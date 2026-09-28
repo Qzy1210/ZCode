@@ -426,6 +426,10 @@ export const PlatformChannels = {
   MigrateLegacyCommonMcp: "zcode:migrate-legacy-common-mcp",
   /** Renderer → Main：获取当前设备的稳定标识符（deviceMid） */
   GetDeviceId: "zcode:get-device-id",
+  /** Renderer → Main：启动/获取移动端局域网配对服务并生成新二维码 URL */
+  MobilePairingCreateQr: "zcode:mobile-pairing-create-qr",
+  /** Renderer → Main：停止移动端配对服务 */
+  MobilePairingStop: "zcode:mobile-pairing-stop",
 } as const;
 
 export type PlatformChannelName = (typeof PlatformChannels)[keyof typeof PlatformChannels];

@@ -187,6 +187,7 @@ import {
   isWorkspaceOpenUrl,
 } from "./desktopDeepLinkUrl.js";
 import { createRemoteWorkspaceSessionManager } from "./desktopRemoteSessions.js";
+import { createMobilePairingController } from "./mobilePairingController.js";
 import {
   reportRemoteConnectionStateChangedToArms,
   reportRemoteDisconnectToArms,
@@ -789,6 +790,13 @@ const remoteSessionManager = createRemoteWorkspaceSessionManager({
 });
 
 const deviceMid = ensureDesktopDeviceMidSync();
+// 移动端局域网配对服务:懒启动,renderer 请求二维码时才监听端口(见 mobilePairingController)。
+// 桥接目标与 cron 派发同策略:任一存活的本地窗口 Host。
+const mobilePairing = createMobilePairingController({
+  deviceMid,
+  resolveBridgeHost: resolveCronDispatchHost,
+  logger,
+});
 // 帮助配置是公开读取，不能复用下面附带账号鉴权的灰度响应缓存。
 const readHelpConfig = createDesktopHelpConfigReader({
   appVersion: ZCODE_VERSION || app.getVersion(),
@@ -1064,6 +1072,15 @@ async function prepareAppQuit(reason: string, kind: AppShutdownKind = "normal"):
     // remote session、attachment 和 transport 都由窗口 Host 持有；这里先清理
     // Main 的请求关联，再由下方每窗口唯一 Host 的 shutdown barrier 释放真实连接与 Agent。
     remoteSessionManager.disposeAllAndWaitForAppShutdown(reason),
+    // 移动端配对服务先于 Host 释放:断开手机 WS 并 detach attachment,避免 Host
+    // 侧等待已断开的 peer。
+    (async () => {
+      try {
+        await mobilePairing.stop();
+      } catch (error) {
+        logger.warn(`[app-quit] mobile pairing stop failed (${reason}):`, error);
+      }
+    })(),
     ...hostProcesses.map((child, index) =>
       disposeHostProcessAndWait(
         child,
@@ -2156,6 +2173,7 @@ app.whenReady().then(async () => {
     syncAppSettings: syncImmediateAppSettings,
     setShortcutRecordingActive,
     deviceMid,
+    mobilePairing,
   });
 
   disposeRendererActionTraceIpc = registerRendererActionTraceIpc({

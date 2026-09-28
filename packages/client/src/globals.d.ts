@@ -320,6 +320,12 @@ declare global {
       getSystemLocale?(): Promise<Locale>;
       /** 同步标题栏亮暗色 */
       setTitleBarTheme(theme: DesktopTitleBarTheme): Promise<void>;
+      /** 生成移动端配对二维码 URL（每次生成作废旧配对会话；mode 区分局域网/中继） */
+      mobilePairingCreateQr?(): Promise<
+        { url: string; mode: "lan" | "relay" } | { error: string }
+      >;
+      /** 停止移动端配对服务（幂等） */
+      mobilePairingStop?(): Promise<void>;
     };
   }
 }

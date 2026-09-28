@@ -1,0 +1,19 @@
+{
+  "name": "@zcode/relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --format=cjs --outfile=dist/relay.cjs --target=node20",
+    "start": "node dist/relay.cjs",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.25.0",
+    "typescript": "^6.0.2"
+  }
+}

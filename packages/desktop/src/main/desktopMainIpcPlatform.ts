@@ -92,6 +92,13 @@ export function registerPlatformIpcHandlers(options: {
   setShortcutRecordingActive?: (active: boolean, ownerWebContentsId?: number | null) => void;
   /** 桌面端设备标识符（基于 userData 路径的 SHA-256） */
   deviceMid: string;
+  /** 移动端局域网配对服务（懒启动；二维码生成入口）。 */
+  mobilePairing?: {
+    createQrUrl: () => Promise<
+      ({ url: string } & { mode: "lan" | "relay" }) | { error: string }
+    >;
+    stop: () => Promise<void>;
+  };
   /** CDP-on-guest pivot：renderer `<webview>` 上报 guest webContentsId → main attach。 */
   attachBrowserGuest?: AttachBrowserGuest;
   /** renderer 自由尺寸变化 → 当前窗口所属的受控 tab。 */
@@ -385,6 +392,16 @@ export function registerPlatformIpcHandlers(options: {
     (_event, request: string | ApplicationIconRequest) => getApplicationIcon(request),
   );
   ipcMain.handle(PlatformChannels.GetDeviceId, () => options.deviceMid);
+  // 移动端配对:未提供控制器(如测试环境)时返回明确错误,不静默成功。
+  ipcMain.handle(PlatformChannels.MobilePairingCreateQr, async () => {
+    if (!options.mobilePairing) {
+      return { error: "mobile pairing is not available" };
+    }
+    return options.mobilePairing.createQrUrl();
+  });
+  ipcMain.handle(PlatformChannels.MobilePairingStop, async () => {
+    await options.mobilePairing?.stop();
+  });
   ipcMain.handle(PlatformChannels.ExportLogs, () => exportLogs());
   ipcMain.handle(PlatformChannels.CaptureWindowScreenshot, async (event) => {
     const senderWindow = BrowserWindow.fromWebContents(event.sender);

@@ -2051,3 +2051,25 @@ body {
 .prompt-mention[data-mention-category="plugins"]::before {
   border-radius: var(--radius-sm);
 }
+
+/* -------------------- 移动端远控页(手机浏览器) --------------------
+ * 仅作用于 packages/web 的 /remote 路由(由 main.tsx 设置 data-zcode-mobile-remote)。
+ * 手机视口下桌面级双栏布局不可用:侧栏从"挤压正文"改为覆盖式抽屉,正文占满全宽;
+ * 抽屉打开时用超大 box-shadow 铺一层非交互遮罩(关闭态整块 opacity-0 自然隐藏)。
+ * 桌面端与普通 Web 不带该标记,以下规则完全不生效。 */
+html[data-zcode-mobile-remote="true"] [data-workspace-sidebar-panel="true"] {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  z-index: 40;
+  width: min(300px, 86vw) !important;
+  max-width: 86vw !important;
+  box-shadow:
+    0 0 0 100vmax rgb(0 0 0 / 0.35),
+    0 12px 32px rgb(0 0 0 / 0.35);
+}
+
+/* 触摸拖拽面板宽度在手机上不适用;侧栏抽屉态下隐藏把手(把手仅在侧栏可见时渲染)。 */
+html[data-zcode-mobile-remote="true"] [data-testid="resizable-handle"] {
+  display: none !important;
+}

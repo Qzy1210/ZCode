@@ -434,6 +434,21 @@ async function bootstrapWebApp() {
     return;
   }
 
+  // 移动端局域网直连页:二维码 URL 指向 /remote,页面 origin 即桌面配对服务。
+  if (window.location.pathname === "/remote") {
+    document.title = "ZCode - Remote";
+    // 移动端布局标记:必须在 Root 首次渲染前同步设置。
+    // useAppPanels 据此让侧栏初始收起,styles.css 据此把侧栏改成覆盖式抽屉。
+    document.documentElement.dataset.zcodeMobileRemote = "true";
+    const { MobileRemotePage } = await import("./remote/MobileRemotePage.js");
+    root.render(
+      <AppErrorBoundary>
+        <MobileRemotePage />
+      </AppErrorBoundary>,
+    );
+    return;
+  }
+
   let bootstrap: WebBootstrapResult;
   try {
     bootstrap = await resolveWebBootstrap();

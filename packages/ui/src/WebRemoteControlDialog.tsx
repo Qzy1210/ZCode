@@ -1,6 +1,7 @@
-import { memo, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
+import QRCode from "qrcode";
 import type { BotProvider } from "@zcode/shared";
-import { Bot as BotIcon, MonitorSmartphone, XIcon } from "lucide-react";
+import { Bot as BotIcon, MonitorSmartphone, QrCode, RefreshCw, XIcon } from "lucide-react";
 import { BotsDialog } from "@/BotsDialog.js";
 import { ProviderIcon } from "@/BotsDialog/shared.js";
 import { Button } from "@/components/ui/button.js";
@@ -11,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog.js";
+import { usePlatform } from "@/hooks/usePlatform.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { logger } from "@/logger.js";
 import { getBotProviderRegionTagLabelId } from "@/botsUi.js";
@@ -41,9 +43,50 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
   workspaceIdentity?: string;
 }) {
   const { intl } = useZCodeIntl();
+  const platform = usePlatform();
   const [botsDialogOpen, setBotsDialogOpen] = useState(false);
   const [botEntryProvider, setBotEntryProvider] =
     useState<RemoteControlBotProvider | null>(null);
+  const [qrImageUrl, setQrImageUrl] = useState<string | null>(null);
+  const [qrError, setQrError] = useState<string | null>(null);
+  const [qrLoading, setQrLoading] = useState(false);
+  const [qrMode, setQrMode] = useState<"lan" | "relay" | null>(null);
+
+  const regenerateQr = useCallback(async () => {
+    if (!platform.mobilePairingCreateQr) {
+      setQrError("当前环境不支持移动端配对");
+      return;
+    }
+    setQrLoading(true);
+    setQrError(null);
+    try {
+      const result = await platform.mobilePairingCreateQr();
+      if ("error" in result) {
+        setQrError(result.error);
+        setQrImageUrl(null);
+        setQrMode(null);
+        return;
+      }
+      setQrMode(result.mode);
+      const dataUrl = await QRCode.toDataURL(result.url, { margin: 1, width: 220 });
+      setQrImageUrl(dataUrl);
+      logger.info("[WebRemoteControlDialog] 移动端配对二维码已生成", { mode: result.mode });
+    } catch (error) {
+      setQrError(error instanceof Error ? error.message : String(error));
+      setQrImageUrl(null);
+    } finally {
+      setQrLoading(false);
+    }
+  }, [platform]);
+
+  useEffect(() => {
+    // 打开弹窗即生成一次二维码;关闭时停止服务释放端口(会话不持久)。
+    if (!open) return;
+    void regenerateQr();
+    return () => {
+      void platform.mobilePairingStop?.().catch(() => {});
+    };
+  }, [open, regenerateQr, platform]);
 
   const handleOpenBotEntry = (provider: RemoteControlBotProvider) => {
     setBotEntryProvider(provider);
@@ -103,6 +146,65 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
             </DialogHeader>
 
             <div className="mt-5 grid gap-4">
+              <section className="flex flex-col rounded-xl border border-border bg-card p-4">
+                <div className="mb-4 flex items-start gap-2">
+                  <QrCode className="mt-0.5 size-4 shrink-0 text-foreground-subtle" />
+                  <div className="min-w-0 space-y-1">
+                    <div className="text-ui-base font-medium text-foreground">
+                      {intl.formatMessage({ id: "webRemoteControl.qr.title" })}
+                    </div>
+                    <p className="text-ui-base/relaxed text-foreground-subtle">
+                      {intl.formatMessage({ id: "webRemoteControl.qr.description" })}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex min-h-[260px] flex-1 items-center justify-center rounded-lg bg-surface p-4">
+                  {qrLoading ? (
+                    <div className="size-8 animate-spin rounded-full border-2 border-border border-t-primary" />
+                  ) : qrImageUrl ? (
+                    <img
+                      src={qrImageUrl}
+                      alt="mobile pairing qr"
+                      className="size-[220px] rounded-lg bg-white p-1"
+                    />
+                  ) : (
+                    <div className="max-w-xs space-y-2 text-center">
+                      <p className="text-ui-sm text-foreground-subtle">{qrError ?? "二维码不可用"}</p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void regenerateQr()}
+                      >
+                        <RefreshCw className="size-3.5" />
+                        {intl.formatMessage({ id: "webRemoteControl.qr.retry" })}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                {qrImageUrl ? (
+                  <div className="mt-3 flex items-center justify-between gap-2">
+                    <p className="text-ui-xs text-foreground-subtle">
+                      {intl.formatMessage({
+                        id:
+                          qrMode === "relay"
+                            ? "webRemoteControl.qr.hint.relay"
+                            : "webRemoteControl.qr.hint.lan",
+                      })}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={qrLoading}
+                      onClick={() => void regenerateQr()}
+                    >
+                      <RefreshCw className="size-3.5" />
+                      {intl.formatMessage({ id: "webRemoteControl.qr.regenerate" })}
+                    </Button>
+                  </div>
+                ) : null}
+              </section>
               <section className="flex min-h-[360px] flex-col rounded-xl border border-border bg-card p-4">
                 <div className="mb-4 flex items-start gap-2">
                   <BotIcon className="mt-0.5 size-4 shrink-0 text-foreground-subtle" />

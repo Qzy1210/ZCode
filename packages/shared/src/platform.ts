@@ -979,4 +979,14 @@ export interface IPlatformService {
    *   抗浏览器/网络/语言/时区变化，换手机才会变
    */
   getDeviceId(): string;
+
+  /** 生成移动端局域网配对二维码 URL(桌面端可选能力;每次生成作废旧配对会话)。
+   *  返回 error 的场景:无局域网 IP、端口被占等,由调用方展示原因。
+   *  mode: "lan" 同网段直连;"relay" 经自托管公网中继(需配置 mobile-relay.json)。 */
+  mobilePairingCreateQr?(): Promise<
+    ({ url: string; mode: "lan" | "relay" } | { error: string })
+  >;
+
+  /** 停止移动端配对服务(桌面端可选能力;幂等)。 */
+  mobilePairingStop?(): Promise<void>;
 }

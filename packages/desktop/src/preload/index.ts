@@ -821,6 +821,13 @@ contextBridge.exposeInMainWorld("zcode", {
     ipcRenderer.invoke(PlatformChannels.SetTitleBarTheme, theme),
   /** 获取桌面端设备标识符（deviceMid） */
   getDeviceId: () => ipcRenderer.invoke(PlatformChannels.GetDeviceId),
+  /** 生成移动端局域网配对二维码 URL（每次生成作废旧配对会话） */
+  mobilePairingCreateQr: (): Promise<
+    { url: string; mode: "lan" | "relay" } | { error: string }
+  > => ipcRenderer.invoke(PlatformChannels.MobilePairingCreateQr),
+  /** 停止移动端配对服务 */
+  mobilePairingStop: (): Promise<void> =>
+    ipcRenderer.invoke(PlatformChannels.MobilePairingStop),
 });
 
 /**

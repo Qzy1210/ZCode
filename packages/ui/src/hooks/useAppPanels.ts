@@ -202,7 +202,14 @@ export function useAppPanels(options: {
   // 交互说明：侧栏显隐按钮放在 App 外层，而不是 Sidebar 内部。
   // 这样即使侧栏被隐藏，入口也仍然留在左上角，不会出现"收起后没有地方再展开"的问题；
   // 同时这里统一处理 macOS 红绿灯安全区，避免按钮和系统窗口控件重叠。
-  const [isSidebarVisible, setIsSidebarVisible] = useState(true);
+  // 移动端远控页(手机浏览器,/remote 路由)视口窄:桌面级 264px 侧栏会把正文挤到不可用,
+  // 默认收起;用户仍可用左上角按钮以覆盖式抽屉展开(抽屉样式见 styles.css 的
+  // data-zcode-mobile-remote 规则)。桌面与普通 Web 不设该标记,行为不变。
+  const [isSidebarVisible, setIsSidebarVisible] = useState(
+    () =>
+      typeof document === "undefined" ||
+      document.documentElement.dataset.zcodeMobileRemote !== "true",
+  );
   const [browserNavigationRequest, setBrowserNavigationRequest] =
     useState<BrowserNavigationRequest | null>(null);
   const [allRecentClosedSidePaneTabs, setAllRecentClosedSidePaneTabs] = useState<

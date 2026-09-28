@@ -845,6 +845,22 @@ importers:
         specifier: ^6.0.2
         version: 6.0.2
 
+  packages/relay:
+    dependencies:
+      ws:
+        specifier: ^8.20.0
+        version: 8.20.0
+    devDependencies:
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
+      typescript:
+        specifier: ^6.0.2
+        version: 6.0.2
+
   packages/rpc:
     devDependencies:
       ts-node:
@@ -1250,6 +1266,9 @@ importers:
       '@zcode/client':
         specifier: workspace:*
         version: link:../client
+      '@zcode/rpc':
+        specifier: workspace:*
+        version: link:../rpc
       '@zcode/shared':
         specifier: workspace:*
         version: link:../shared
@@ -16172,11 +16191,11 @@ snapshots:
 
   lodash.merge@4.6.2: {}
 
+  lodash.pickby@4.6.0: {}
+
   lodash.uniqby@4.7.0: {}
 
   lodash@4.18.1: {}
-
-  lodash.pickby@4.6.0: {}
 
   log-symbols@4.1.0:
     dependencies:
