@@ -166,5 +166,9 @@ export function createDesktopPlatform(options: {
       window.zcode.mobilePairingCreateQr?.(options) ??
       Promise.resolve({ error: "mobile pairing is not available" }),
     mobilePairingStop: () => window.zcode.mobilePairingStop?.() ?? Promise.resolve(),
+    mobilePairingListDevices: () =>
+      window.zcode.mobilePairingListDevices?.() ?? Promise.resolve([]),
+    mobilePairingRevokeDevice: (deviceId: string) =>
+      window.zcode.mobilePairingRevokeDevice?.(deviceId) ?? Promise.resolve(false),
   };
 }

@@ -18,17 +18,16 @@
  * - RELAY_TLS_CERT / RELAY_TLS_KEY: 可选;提供时启用 HTTPS/WSS
  */
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { extname, join, normalize, resolve } from "node:path";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { gzipSync } from "node:zlib";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
+import { createRelayStaticAssets } from "./staticAssets.js";
 
 const PORT = Number(process.env.RELAY_PORT || 8787);
 const HOST_BIND = process.env.RELAY_HOST || "0.0.0.0";
 const HOST_TOKEN = process.env.RELAY_HOST_TOKEN?.trim() || "";
-const WEB_DIST = resolve(process.env.RELAY_WEB_DIST || "./web-dist");
+const WEB_DIST = process.env.RELAY_WEB_DIST || "./web-dist";
+const staticAssets = createRelayStaticAssets(WEB_DIST);
 const TLS_CERT = process.env.RELAY_TLS_CERT?.trim();
 const TLS_KEY = process.env.RELAY_TLS_KEY?.trim();
 
@@ -44,12 +43,27 @@ if (!HOST_TOKEN) {
 
 interface HostEntry {
   ws: WebSocket;
-  sid: string;
+  /** 扫码会话 id(重新生成二维码时变化;常驻启动时可能为空)。 */
+  sid: string | null;
+  /** 桌面持久身份(App 免扫码连接按 hostId 路由;老版本客户端可能不提供)。 */
+  hostId: string | null;
   phone: WebSocket | null;
 }
 
-/** sid → 桌面连接。 */
+/** sid → 桌面连接(扫码会话路由)。 */
 const hostsBySid = new Map<string, HostEntry>();
+/** hostId → 桌面连接(App 免扫码路由,跨二维码重新生成保持稳定)。 */
+const hostsByHostId = new Map<string, HostEntry>();
+
+/** 精确下线一个 entry 的两个索引(只在映射仍指向该 entry 时删除,避免误删新连接)。 */
+function removeHostIndexes(target: HostEntry): void {
+  if (target.sid && hostsBySid.get(target.sid) === target) {
+    hostsBySid.delete(target.sid);
+  }
+  if (target.hostId && hostsByHostId.get(target.hostId) === target) {
+    hostsByHostId.delete(target.hostId);
+  }
+}
 
 function log(level: "info" | "warn" | "error", message: string, extra?: unknown): void {
   const line = `[relay] ${message}`;
@@ -59,105 +73,6 @@ function log(level: "info" | "warn" | "error", message: string, extra?: unknown)
 }
 
 /* -------------------------------- 静态资源 -------------------------------- */
-
-const MIME_BY_EXT: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".ico": "image/x-icon",
-  ".woff2": "font/woff2",
-  ".map": "application/json",
-};
-
-/** index.html 必须每次回源校验:资源名带内容哈希,新构建换新文件名。 */
-const INDEX_CACHE_CONTROL = "no-cache";
-/** Vite 产物文件名含内容哈希,可安全永久缓存——手机页每次刷新不再重下全部 JS。 */
-const HASHED_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
-
-/**
- * 文本类资源按需 gzip:首屏初始加载约 8.7MB JS,不压缩在公网传输上代价过高。
- * 压缩结果按路径缓存(产物文件名带哈希,内容不可变,可安全长期缓存);
- * 上限放到 16MB:最大主包(5.6MB)必须覆盖;单文件首次压缩的同步开销一次性发生,之后走缓存。
- */
-const COMPRESSIBLE_EXT = new Set([".js", ".mjs", ".css", ".json", ".svg", ".map"]);
-const GZIP_MAX_BYTES = 16 * 1024 * 1024;
-const GZIP_MAX_CACHE_ENTRIES = 256;
-const gzipCache = new Map<string, Buffer>();
-
-function maybeGzip(
-  request: import("node:http").IncomingMessage,
-  filePath: string,
-  content: Buffer,
-): { body: Buffer; encoding?: string } {
-  const ext = extname(filePath);
-  if (!COMPRESSIBLE_EXT.has(ext) || content.byteLength > GZIP_MAX_BYTES) {
-    return { body: content };
-  }
-  const acceptsGzip = /\bgzip\b/.test(request.headers["accept-encoding"] ?? "");
-  if (!acceptsGzip) return { body: content };
-  const cached = gzipCache.get(filePath);
-  if (cached) return { body: cached, encoding: "gzip" };
-  const compressed = gzipSync(content);
-  if (gzipCache.size >= GZIP_MAX_CACHE_ENTRIES) gzipCache.clear();
-  gzipCache.set(filePath, compressed);
-  return { body: compressed, encoding: "gzip" };
-}
-
-async function serveIndex(res: import("node:http").ServerResponse): Promise<void> {
-  try {
-    const index = await readFile(join(WEB_DIST, "index.html"));
-    res.writeHead(200, {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": INDEX_CACHE_CONTROL,
-    });
-    res.end(index);
-  } catch {
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(
-      `<!doctype html><meta charset="utf-8"><title>ZCode</title>` +
-        `<body style="font-family:system-ui;background:#161616;color:#e2e8f0;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">` +
-        `<div style="max-width:28rem;padding:1.5rem"><h1 style="font-size:1rem">手机端页面未部署</h1>` +
-        `<p style="font-size:.875rem;opacity:.7">请将 packages/web/dist 上传到 RELAY_WEB_DIST 指定目录后重启 relay。</p></div></body>`,
-    );
-  }
-}
-
-async function serveStatic(
-  request: import("node:http").IncomingMessage,
-  res: import("node:http").ServerResponse,
-  pathname: string,
-): Promise<void> {
-  const isAsset = pathname.startsWith("/assets/") || pathname.startsWith("/remote/assets/");
-  if (!isAsset) {
-    await serveIndex(res);
-    return;
-  }
-  const relative = pathname.replace(/^\/(remote\/)?/, "");
-  const absolute = normalize(join(WEB_DIST, relative));
-  // 路径穿越防护:解析后必须仍在 WEB_DIST 内。
-  if (!absolute.startsWith(WEB_DIST)) {
-    res.writeHead(403);
-    res.end("Forbidden");
-    return;
-  }
-  try {
-    const content = await readFile(absolute);
-    const mime = MIME_BY_EXT[extname(absolute)] ?? "application/octet-stream";
-    const compressed = maybeGzip(request, absolute, content);
-    res.writeHead(200, {
-      "Content-Type": mime,
-      "Cache-Control": HASHED_ASSET_CACHE_CONTROL,
-      Vary: "Accept-Encoding",
-      ...(compressed.encoding ? { "Content-Encoding": compressed.encoding } : {}),
-    });
-    res.end(compressed.body);
-  } catch {
-    await serveIndex(res);
-  }
-}
 
 /* --------------------------------- 心跳 ---------------------------------- */
 
@@ -202,39 +117,68 @@ function handleHostSocket(ws: WebSocket): void {
    * 连接换新 sid——此前只在首帧接受注册,导致新二维码扫进来查无注册(pair_unknown),
    * 且旧 sid 残留成幽灵路由(线上故障根因,勿回退成一次性监听)。
    */
-  function handleHostRegister(register: { token?: string; sid?: string }): void {
-    if (typeof register.sid !== "string" || register.sid.length === 0) return;
+  function handleHostRegister(register: {
+    token?: string;
+    sid?: string;
+    hostId?: string;
+  }): void {
     if (register.token !== HOST_TOKEN) {
       ws.send(JSON.stringify({ type: "host_error", code: "invalid_token" }));
       ws.close(4001, "invalid_token");
       log("warn", "host_register rejected: invalid token");
       return;
     }
-    const sid = register.sid;
-    if (entry?.sid === sid) {
-      // 幂等:同一 sid 重复注册(网络重连后重发)只回执,不动已建立的手机连接。
-      ws.send(JSON.stringify({ type: "host_registered", sid }));
+    const nextSid =
+      typeof register.sid === "string" && register.sid.length > 0 ? register.sid : null;
+    const nextHostId =
+      typeof register.hostId === "string" && register.hostId.length > 0
+        ? register.hostId
+        : null;
+    if (!nextSid && !nextHostId) return;
+
+    // 幂等:两个身份都未变化(网络重连后重发)只回执,不动已建立的手机连接。
+    if (entry && entry.sid === nextSid && entry.hostId === nextHostId) {
+      ws.send(JSON.stringify({ type: "host_registered", sid: nextSid }));
       return;
     }
-    if (entry) {
-      // 同一 socket 更换 sid:旧 sid 路由精确下线,旧手机按"重新生成"语义断开。
+
+    // sid 变化(或首次进入)按"重新生成"语义断开旧手机;仅补注册 hostId 时保持连接。
+    const sidChanged = !entry || entry.sid !== nextSid;
+    if (entry && sidChanged && entry.sid !== null) {
       detachPhone(entry, "superseded");
-      if (hostsBySid.get(entry.sid) === entry) {
-        hostsBySid.delete(entry.sid);
+    }
+
+    // 清理当前连接的旧索引(entry 复用,保持 host 连接身份连续)。
+    if (entry) removeHostIndexes(entry);
+
+    // 新身份若已被其他连接占用:顶替(桌面重装的旧连接残留)。
+    if (nextSid) {
+      const existing = hostsBySid.get(nextSid);
+      if (existing && existing.ws !== ws) {
+        detachPhone(existing, "superseded");
+        existing.ws.close(4000, "superseded");
+        removeHostIndexes(existing);
       }
-      entry = null;
     }
-    // 同 sid 已有其他连接:顶替旧连接(桌面重连场景)。
-    const existing = hostsBySid.get(sid);
-    if (existing && existing.ws !== ws) {
-      detachPhone(existing, "superseded");
-      existing.ws.close(4000, "superseded");
-      hostsBySid.delete(sid);
+    if (nextHostId) {
+      const existing = hostsByHostId.get(nextHostId);
+      if (existing && existing.ws !== ws) {
+        detachPhone(existing, "superseded");
+        existing.ws.close(4000, "superseded");
+        removeHostIndexes(existing);
+      }
     }
-    entry = { ws, sid, phone: null };
-    hostsBySid.set(sid, entry);
-    ws.send(JSON.stringify({ type: "host_registered", sid }));
-    log("info", `host registered, sid=${sid.slice(0, 6)}…`);
+
+    entry = entry ?? { ws, sid: null, hostId: null, phone: null };
+    entry.sid = nextSid;
+    entry.hostId = nextHostId;
+    if (nextSid) hostsBySid.set(nextSid, entry);
+    if (nextHostId) hostsByHostId.set(nextHostId, entry);
+    ws.send(JSON.stringify({ type: "host_registered", sid: nextSid }));
+    log(
+      "info",
+      `host registered, sid=${nextSid ? `${nextSid.slice(0, 6)}…` : "(none)"}, hostId=${nextHostId ? `${nextHostId.slice(0, 8)}…` : "(none)"}`,
+    );
   }
 
   ws.on("message", (raw: RawData, isBinary: boolean) => {
@@ -247,7 +191,7 @@ function handleHostSocket(ws: WebSocket): void {
         parsed = null;
       }
       if (parsed?.type === "host_register") {
-        handleHostRegister(parsed as { token?: string; sid?: string });
+        handleHostRegister(parsed as { token?: string; sid?: string; hostId?: string });
         return;
       }
       if (entry && parsed?.type === "phone_close") {
@@ -269,10 +213,11 @@ function handleHostSocket(ws: WebSocket): void {
   ws.on("close", () => {
     if (!entry) return;
     detachPhone(entry, "host_disconnected");
-    if (hostsBySid.get(entry.sid) === entry) {
-      hostsBySid.delete(entry.sid);
-    }
-    log("info", `host disconnected, sid=${entry.sid.slice(0, 6)}…`);
+    removeHostIndexes(entry);
+    log(
+      "info",
+      `host disconnected, sid=${entry.sid ? `${entry.sid.slice(0, 6)}…` : "(none)"}`,
+    );
     entry = null;
   });
 }
@@ -286,10 +231,16 @@ function handlePhoneSocket(ws: WebSocket): void {
 
   function routeFirstFrame(text: string): boolean {
     try {
-      const parsed = JSON.parse(text) as { type?: string; device_sid?: string };
-      if (parsed?.type !== "auth_init" || typeof parsed.device_sid !== "string") return false;
-      const sid = parsed.device_sid;
-      const entry = hostsBySid.get(sid);
+      const parsed = JSON.parse(text) as {
+        type?: string;
+        device_sid?: string;
+        hostId?: string;
+      };
+      // 两种入口:扫码会话按 sid;App 免扫码按 hostId(桌面持久身份)。
+      const sid = parsed?.type === "auth_init" ? parsed.device_sid : undefined;
+      const hostId = parsed?.type === "app_auth_init" ? parsed.hostId : undefined;
+      if (!sid && !hostId) return false;
+      const entry = sid ? hostsBySid.get(sid) : hostsByHostId.get(hostId!);
       if (!entry) {
         ws.send(JSON.stringify({ type: "error", code: "pair_unknown", message: "desktop offline or not registered" }));
         ws.close(4000, "pair_unknown");
@@ -354,7 +305,7 @@ const requestListener: import("node:http").RequestListener = (req, res) => {
     res.end();
     return;
   }
-  void serveStatic(req, res, url.pathname).catch(() => {
+  void staticAssets.serve(req, res, url.pathname).catch(() => {
     if (!res.headersSent) {
       res.writeHead(500);
       res.end();

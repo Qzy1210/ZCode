@@ -7,6 +7,7 @@ import {
   type MobilePairingManager,
 } from "./mobilePairingManager.js";
 import { createMobilePairingWebAssets } from "./mobilePairingWebAssets.js";
+import type { MobileAppDeviceRegistry } from "./mobileAppDeviceRegistry.js";
 import {
   createMobilePairingSession,
   type MobilePairingSession,
@@ -42,6 +43,8 @@ export interface MobilePairingServerHandle {
 }
 
 export interface CreateMobilePairingServerOptions {
+  /** 持久设备登记表(App 免扫码模式共用;LAN 模式同样支持)。 */
+  deviceRegistry: MobileAppDeviceRegistry;
   /** 取用于桥接的窗口 Host(与 resolveCronDispatchHost 同策略:任一本地窗口 Host)。 */
   resolveBridgeHost: () => import("electron").UtilityProcess | null;
   /** 桌面设备 ID(进二维码)。 */
@@ -121,6 +124,7 @@ export async function createMobilePairingServer(
       },
       {
         pairingManager,
+        deviceRegistry: options.deviceRegistry,
         resolveBridgeHost: options.resolveBridgeHost,
         logger,
       },

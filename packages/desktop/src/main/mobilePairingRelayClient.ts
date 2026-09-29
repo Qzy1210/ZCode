@@ -1,5 +1,6 @@
 import { WebSocket } from "ws";
 import type { UtilityProcess as ElectronUtilityProcess } from "electron";
+import type { MobileAppDeviceRegistry } from "./mobileAppDeviceRegistry.js";
 import type { MobilePairingManager } from "./mobilePairingManager.js";
 import {
   createMobilePairingSession,
@@ -28,6 +29,8 @@ export interface RelayClientConfig {
   relayOrigin: string;
   /** 桌面注册令牌(与 relay 的 RELAY_HOST_TOKEN 一致)。 */
   hostToken: string;
+  /** 桌面持久身份:App 免扫码连接按 hostId 经 relay 路由。 */
+  hostId: string;
 }
 
 export interface RelayClientEvents {
@@ -52,6 +55,7 @@ export function createMobilePairingRelayClient(
   config: RelayClientConfig,
   options: {
     pairingManager: MobilePairingManager;
+    deviceRegistry: MobileAppDeviceRegistry;
     resolveBridgeHost: () => ElectronUtilityProcess | null;
     onStatusChange?: (status: RelayClientStatus) => void;
     logger: {
@@ -61,7 +65,7 @@ export function createMobilePairingRelayClient(
     };
   },
 ): MobilePairingRelayClientHandle {
-  const { pairingManager, resolveBridgeHost, logger } = options;
+  const { pairingManager, deviceRegistry, resolveBridgeHost, logger } = options;
   let disposed = false;
   let sid: string | null = null;
   let ws: WebSocket | null = null;
@@ -76,7 +80,8 @@ export function createMobilePairingRelayClient(
   }
 
   function scheduleReconnect(): void {
-    if (disposed || !sid) return;
+    // 常驻启动(App 免扫码模式)没有 sid,但 hostId 注册同样需要重连保活。
+    if (disposed) return;
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempt, RECONNECT_MAX_MS);
     reconnectAttempt += 1;
     reconnectTimer = setTimeout(() => connect(), delay);
@@ -84,7 +89,7 @@ export function createMobilePairingRelayClient(
   }
 
   function connect(): void {
-    if (disposed || !sid) return;
+    if (disposed) return;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
@@ -99,7 +104,15 @@ export function createMobilePairingRelayClient(
 
     socket.on("open", () => {
       clearTimeout(connectTimeout);
-      socket.send(JSON.stringify({ type: "host_register", token: config.hostToken, sid }));
+      socket.send(
+        JSON.stringify({
+          type: "host_register",
+          token: config.hostToken,
+          hostId: config.hostId,
+          // 未生成二维码时(App 免扫码启动)允许只注册 hostId,sid 后续补注册。
+          ...(sid ? { sid } : {}),
+        }),
+      );
     });
 
     socket.on("message", (raw, isBinary) => {
@@ -171,7 +184,7 @@ export function createMobilePairingRelayClient(
             }
           },
         },
-        { pairingManager, resolveBridgeHost, logger },
+        { pairingManager, deviceRegistry, resolveBridgeHost, logger },
       );
       return {
         handleControlFrame: (text) => {
@@ -195,7 +208,14 @@ export function createMobilePairingRelayClient(
       sid = nextSid;
       if (ws && ws.readyState === WebSocket.OPEN) {
         // 已连接:直接补注册帧(relay 侧顶替旧 sid)。
-        ws.send(JSON.stringify({ type: "host_register", token: config.hostToken, sid: nextSid }));
+        ws.send(
+          JSON.stringify({
+            type: "host_register",
+            token: config.hostToken,
+            hostId: config.hostId,
+            sid: nextSid,
+          }),
+        );
         return;
       }
       reconnectAttempt = 0;

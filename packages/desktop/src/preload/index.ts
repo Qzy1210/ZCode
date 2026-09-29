@@ -828,6 +828,11 @@ contextBridge.exposeInMainWorld("zcode", {
   /** 停止移动端配对服务 */
   mobilePairingStop: (): Promise<void> =>
     ipcRenderer.invoke(PlatformChannels.MobilePairingStop),
+  /** 列出已配对设备(App 免扫码凭证) */
+  mobilePairingListDevices: () => ipcRenderer.invoke(PlatformChannels.MobilePairingListDevices),
+  /** 吊销设备凭证 */
+  mobilePairingRevokeDevice: (deviceId: string) =>
+    ipcRenderer.invoke(PlatformChannels.MobilePairingRevokeDevice, deviceId),
 });
 
 /**

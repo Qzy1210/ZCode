@@ -21,6 +21,7 @@ import {
   type UpdateStatePayload,
   type WindowControlsOverlayReadyPayload,
 } from "@zcode/shared";
+import type { MobileAppDeviceSummary } from "./mobileAppDeviceRegistry.js";
 import { getInstalledEditors } from "./editors.js";
 import { getApplicationIcon } from "./applicationIcons.js";
 import { exportLogs } from "./exportLogs.js";
@@ -98,6 +99,8 @@ export function registerPlatformIpcHandlers(options: {
       ({ url: string } & { mode: "lan" | "relay" }) | { error: string }
     >;
     stop: () => Promise<void>;
+    listDevices: () => MobileAppDeviceSummary[];
+    revokeDevice: (deviceId: string) => boolean;
   };
   /** CDP-on-guest pivot：renderer `<webview>` 上报 guest webContentsId → main attach。 */
   attachBrowserGuest?: AttachBrowserGuest;
@@ -406,6 +409,13 @@ export function registerPlatformIpcHandlers(options: {
   });
   ipcMain.handle(PlatformChannels.MobilePairingStop, async () => {
     await options.mobilePairing?.stop();
+  });
+  ipcMain.handle(PlatformChannels.MobilePairingListDevices, () =>
+    options.mobilePairing?.listDevices() ?? [],
+  );
+  ipcMain.handle(PlatformChannels.MobilePairingRevokeDevice, (_event, deviceId: unknown) => {
+    if (typeof deviceId !== "string" || deviceId.length === 0) return false;
+    return options.mobilePairing?.revokeDevice(deviceId) ?? false;
   });
   ipcMain.handle(PlatformChannels.ExportLogs, () => exportLogs());
   ipcMain.handle(PlatformChannels.CaptureWindowScreenshot, async (event) => {

@@ -430,6 +430,10 @@ export const PlatformChannels = {
   MobilePairingCreateQr: "zcode:mobile-pairing-create-qr",
   /** Renderer → Main：停止移动端配对服务 */
   MobilePairingStop: "zcode:mobile-pairing-stop",
+  /** Renderer → Main：列出已配对设备（App 免扫码凭证） */
+  MobilePairingListDevices: "zcode:mobile-pairing-list-devices",
+  /** Renderer → Main：吊销指定设备凭证 */
+  MobilePairingRevokeDevice: "zcode:mobile-pairing-revoke-device",
 } as const;
 
 export type PlatformChannelName = (typeof PlatformChannels)[keyof typeof PlatformChannels];

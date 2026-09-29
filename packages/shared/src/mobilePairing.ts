@@ -124,6 +124,8 @@ export const MOBILE_PAIRING_ERROR_CODES = [
   "auth_expired",
   "pair_expired",
   "pair_unknown",
+  "device_unknown",
+  "device_revoked",
   "rate_limited",
   "workspace_unavailable",
   "bridge_failed",
@@ -176,10 +178,82 @@ export const mobilePairingBridgeReadyFrameSchema = z
   .strict();
 export type MobilePairingBridgeReadyFrame = z.infer<typeof mobilePairingBridgeReadyFrameSchema>;
 
+/* ------------------------- 持久设备凭证(App 模式) ------------------------- */
+/*
+ * 首次经二维码配对、会话认证通过后,App 可请求签发长期设备凭证;
+ * 之后每次启动免扫码:app_auth_init(hostId 供 relay 路由,deviceId 供桌面校验)
+ * → 挑战应答(HMAC,role="app")→ 桥接。凭证只在签发时下发一次。
+ */
+
+/** 设备认证角色(与扫码会话的 terminal 区分,proof 域隔离)。 */
+export const MOBILE_APP_AUTH_ROLE = "app" as const;
+
+/** App → 桌面:请求签发长期凭证(仅允许在已认证会话上)。 */
+export const mobileAppRegisterRequestSchema = z
+  .object({
+    type: z.literal("app_register_request"),
+    deviceName: z.string().min(1).max(64),
+  })
+  .strict();
+export type MobileAppRegisterRequest = z.infer<typeof mobileAppRegisterRequestSchema>;
+
+/** 桌面 → App:签发凭证(secret 仅此一次下发,桌面落盘保存)。 */
+export const mobileAppRegisterGrantedSchema = z
+  .object({
+    type: z.literal("device_registered"),
+    hostId: nonEmptyString,
+    deviceId: nonEmptyString,
+    deviceSecret: nonEmptyString,
+  })
+  .strict();
+export type MobileAppRegisterGranted = z.infer<typeof mobileAppRegisterGrantedSchema>;
+
+/** App → 桌面:免扫码连接发起。 */
+export const mobileAppAuthInitSchema = z
+  .object({
+    type: z.literal("app_auth_init"),
+    hostId: nonEmptyString,
+    deviceId: nonEmptyString,
+  })
+  .strict();
+export type MobileAppAuthInit = z.infer<typeof mobileAppAuthInitSchema>;
+
+/** 桌面 → App:设备认证挑战。 */
+export const mobileAppAuthChallengeSchema = z
+  .object({
+    type: z.literal("app_auth_challenge"),
+    nonce: nonEmptyString,
+  })
+  .strict();
+export type MobileAppAuthChallenge = z.infer<typeof mobileAppAuthChallengeSchema>;
+
+/** App → 桌面:设备认证应答(proof 见 calculateMobilePairingProofPure,role="app",id=deviceId)。 */
+export const mobileAppAuthResponseSchema = z
+  .object({
+    type: z.literal("app_auth_response"),
+    deviceId: nonEmptyString,
+    proof: nonEmptyString,
+    client_ts: z.number().int().positive(),
+  })
+  .strict();
+export type MobileAppAuthResponse = z.infer<typeof mobileAppAuthResponseSchema>;
+
+/** 桌面 → App:设备认证通过。 */
+export const mobileAppAuthAckSchema = z
+  .object({
+    type: z.literal("app_auth_ack"),
+    pair_status: z.literal("paired"),
+  })
+  .strict();
+export type MobileAppAuthAck = z.infer<typeof mobileAppAuthAckSchema>;
+
 /** 手机 → 桌面所有可能帧。 */
 export const mobilePairingClientFrameSchema = z.discriminatedUnion("type", [
   mobilePairingAuthInitSchema,
   mobilePairingAuthResponseSchema,
+  mobileAppAuthInitSchema,
+  mobileAppAuthResponseSchema,
+  mobileAppRegisterRequestSchema,
   mobilePairingBridgeRequestFrameSchema,
   mobilePairingDataFrameSchema,
 ]);
@@ -189,6 +263,9 @@ export type MobilePairingClientFrame = z.infer<typeof mobilePairingClientFrameSc
 export const mobilePairingServerFrameSchema = z.discriminatedUnion("type", [
   mobilePairingAuthChallengeSchema,
   mobilePairingAuthAckFrameSchema,
+  mobileAppAuthChallengeSchema,
+  mobileAppAuthAckSchema,
+  mobileAppRegisterGrantedSchema,
   mobilePairingBridgeReadyFrameSchema,
   mobilePairingErrorFrameSchema,
   mobilePairingDataFrameSchema,

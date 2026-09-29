@@ -8,6 +8,10 @@ import { createMobilePairingRelayClient } from "./mobilePairingRelayClient.js";
 import type { MobilePairingServerHandle } from "./mobilePairingServer.js";
 import { createMobilePairingServer } from "./mobilePairingServer.js";
 import {
+  createMobileAppDeviceRegistry,
+  type MobileAppDeviceSummary,
+} from "./mobileAppDeviceRegistry.js";
+import {
   createMobilePairingManager,
   type MobilePairingManager,
 } from "./mobilePairingManager.js";
@@ -69,6 +73,15 @@ export interface MobilePairingController {
   describe(): { mode: "lan" | "relay"; relayRegistered: boolean; relayOrigin?: string };
   /** 服务是否在运行。 */
   isRunning(): boolean;
+  /**
+   * 应用启动时调用:relay 模式常驻连接,不打开弹窗也能接受 App 免扫码连接。
+   * LAN 模式不常驻(避免无谓地绑定端口),仍按弹窗按需启动。
+   */
+  start(): void;
+  /** 已配对设备列表(供弹窗展示)。 */
+  listDevices(): MobileAppDeviceSummary[];
+  /** 吊销设备:App 端下次连接收到 device_unknown,应清除本地凭证重新扫码。 */
+  revokeDevice(deviceId: string): boolean;
 }
 
 export interface CreateMobilePairingControllerOptions {
@@ -86,6 +99,8 @@ export function createMobilePairingController(
 ): MobilePairingController {
   const { deviceMid, resolveBridgeHost, logger } = options;
   const relayConfig = resolveMobileRelayConfig();
+  // 设备登记表:App 免扫码模式的核心状态(hostId + 已签发设备),单例共享给 LAN/relay 两条链路。
+  const deviceRegistry = createMobileAppDeviceRegistry();
 
   let lanServer: MobilePairingServerHandle | null = null;
   let lanStarting: Promise<MobilePairingServerHandle> | null = null;
@@ -134,6 +149,7 @@ export function createMobilePairingController(
               : undefined);
         lanStarting = createMobilePairingServer({
           deviceMid,
+          deviceRegistry,
           resolveBridgeHost,
           logger,
           ...(webDistDir ? { webDistDir } : {}),
@@ -157,6 +173,30 @@ export function createMobilePairingController(
     return { url: lanServer.createQrUrl(), mode: "lan" };
   }
 
+  /** 懒创建 relay 客户端;常驻启动与二维码生成共用同一入口。 */
+  function ensureRelayClient(): MobilePairingRelayClientHandle | null {
+    if (!relayConfig) return null;
+    if (!relayClient) {
+      relayClient = createMobilePairingRelayClient(
+        {
+          relayOrigin: relayConfig.relayUrl,
+          hostToken: relayConfig.hostToken,
+          hostId: deviceRegistry.getHostId(),
+        },
+        {
+          pairingManager: ensurePairingManager(),
+          deviceRegistry,
+          resolveBridgeHost,
+          logger,
+          onStatusChange: (status) => {
+            relayRegistered = status.kind === "registered";
+          },
+        },
+      );
+    }
+    return relayClient;
+  }
+
   async function createQrUrlViaRelay(): Promise<
     ({ url: string } & { mode: "lan" | "relay" }) | { error: string }
   > {
@@ -167,20 +207,9 @@ export function createMobilePairingController(
       hostname: osHostname(),
       appVersion: ZCODE_VERSION,
     });
-    if (!relayClient) {
-      relayClient = createMobilePairingRelayClient(
-        { relayOrigin: relayConfig.relayUrl, hostToken: relayConfig.hostToken },
-        {
-          pairingManager: manager,
-          resolveBridgeHost,
-          logger,
-          onStatusChange: (status) => {
-            relayRegistered = status.kind === "registered";
-          },
-        },
-      );
-    }
-    relayClient.registerSid(payload.sid);
+    const client = ensureRelayClient();
+    if (!client) return { error: "mobile relay is not configured" };
+    client.registerSid(payload.sid);
     return { url: buildQrUrl(relayConfig.relayUrl, payload), mode: "relay" };
   }
 
@@ -234,6 +263,20 @@ export function createMobilePairingController(
     },
     isRunning() {
       return lanServer !== null || relayClient !== null;
+    },
+    start() {
+      const client = ensureRelayClient();
+      if (client) {
+        logger.info("[mobile-pairing] relay client started (always-on)");
+      }
+    },
+    listDevices: () => deviceRegistry.listDevices(),
+    revokeDevice(deviceId: string) {
+      const revoked = deviceRegistry.revokeDevice(deviceId);
+      if (revoked) {
+        logger.info(`[mobile-pairing] device revoked, id=${deviceId.slice(0, 8)}…`);
+      }
+      return revoked;
     },
   };
 }

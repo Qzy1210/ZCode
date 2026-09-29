@@ -1942,6 +1942,9 @@ app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
 
 app.whenReady().then(async () => {
   markMainLaunchAppReady();
+  // App 免扫码模式:配置了 relay 时启动常驻连接(hostId 注册),不依赖弹窗打开;
+  // 手机 App 携带长期凭证即可随时连入。LAN 模式仍按弹窗按需启动。
+  mobilePairing.start();
   installLocalMediaPreviewProtocol(session.defaultSession.protocol, {
     isPathAuthorized: localMediaPreviewPathRegistry.isAuthorized,
   });

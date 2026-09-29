@@ -3,16 +3,22 @@ import { MessageChannelMain, type MessagePortMain } from "electron";
 import type { UtilityProcess as ElectronUtilityProcess } from "electron";
 import {
   HostMessageTypes,
+  mobileAppAuthAckSchema,
+  mobileAppAuthChallengeSchema,
+  mobileAppRegisterGrantedSchema,
   mobilePairingAuthAckFrameSchema,
   mobilePairingAuthChallengeSchema,
   mobilePairingBridgeReadyFrameSchema,
   mobilePairingErrorFrameSchema,
   type MobilePairingServerFrame,
 } from "@zcode/shared";
+import type { MobileAppDeviceRegistry } from "./mobileAppDeviceRegistry.js";
 import {
   generateMobilePairingAttachmentId,
   type MobilePairingManager,
 } from "./mobilePairingManager.js";
+// 设备认证的一次性 nonce 走 shared 的随机源(与 registry 的校验实现同源),manager 不导出该函数。
+import { generateMobilePairingNonce } from "@zcode/shared/mobilePairingCrypto";
 
 /**
  * 配对会话处理器:控制面状态机 + Host MessagePort 桥(数据面)。
@@ -40,6 +46,8 @@ export interface MobilePairingSessionTransport {
 
 export interface CreateMobilePairingSessionOptions {
   pairingManager: MobilePairingManager;
+  /** 持久设备登记表:app_auth_* / app_register_request 走这里(免扫码模式)。 */
+  deviceRegistry: MobileAppDeviceRegistry;
   resolveBridgeHost: () => ElectronUtilityProcess | null;
   logger: {
     info: (...args: unknown[]) => void;
@@ -63,9 +71,13 @@ export function createMobilePairingSession(
   transport: MobilePairingSessionTransport,
   options: CreateMobilePairingSessionOptions,
 ): MobilePairingSession {
-  const { pairingManager, resolveBridgeHost, logger } = options;
+  const { pairingManager, deviceRegistry, resolveBridgeHost, logger } = options;
   let sid = "";
   let authed = false;
+  /** 认证模式:sid=扫码会话(十分钟 TTL);device=长期设备凭证(免扫码)。 */
+  let authMode: "sid" | "device" | null = null;
+  let deviceId = "";
+  let deviceChallengeNonce: string | null = null;
   let hostPort: MessagePortMain | null = null;
   let hostProcess: ElectronUtilityProcess | null = null;
   let attachmentId: string | null = null;
@@ -173,12 +185,18 @@ export function createMobilePairingSession(
     port1.start();
     // 桥接存活期间周期续期配对会话:手机页面被系统回收后重载时,
     // 只要它此前保持在线,就还能用同一链接重新认证,不必回到桌面重新扫码。
-    bridgeTouchTimer = setInterval(() => pairingManager.touch(sid), BRIDGE_TOUCH_INTERVAL_MS);
+    bridgeTouchTimer = setInterval(() => {
+      if (authMode === "device" && deviceId) {
+        deviceRegistry.touchDevice(deviceId);
+      } else if (sid) {
+        pairingManager.touch(sid);
+      }
+    }, BRIDGE_TOUCH_INTERVAL_MS);
 
     sendFrame(
       mobilePairingBridgeReadyFrameSchema.parse({ type: "bridge_ready", workspaceKey }),
     );
-    logger.info(`[mobile-pairing] bridge established, sid=${sid.slice(0, 6)}…`);
+    logger.info(`[mobile-pairing] bridge established, ${sessionLabel()}`);
   }
 
   function handleAuthInit(record: { device_sid?: unknown }): void {
@@ -216,9 +234,86 @@ export function createMobilePairingSession(
       return;
     }
     authed = true;
+    authMode = "sid";
     sendFrame(
       mobilePairingAuthAckFrameSchema.parse({ type: "auth_ack", pair_status: "paired" }),
     );
+  }
+
+  /** 会话标签:日志统一出口,避免 device 模式打印空 sid。 */
+  function sessionLabel(): string {
+    return authMode === "device" ? `device=${deviceId.slice(0, 8)}…` : `sid=${sid.slice(0, 6)}…`;
+  }
+
+  /** App 免扫码连接第一步:校验 hostId 归属后下发一次性 nonce。 */
+  function handleAppAuthInit(record: { hostId?: unknown; deviceId?: unknown }): void {
+    const hostId = typeof record.hostId === "string" ? record.hostId : "";
+    const candidateDeviceId = typeof record.deviceId === "string" ? record.deviceId : "";
+    // hostId 不匹配说明凭证不是本机签发的(如桌面登记表被重建),App 应清除凭证重新扫码。
+    if (!hostId || hostId !== deviceRegistry.getHostId() || !candidateDeviceId) {
+      sendErrorAndClose("device_unknown");
+      return;
+    }
+    deviceChallengeNonce = generateMobilePairingNonce();
+    deviceId = candidateDeviceId;
+    sendFrame(
+      mobileAppAuthChallengeSchema.parse({
+        type: "app_auth_challenge",
+        nonce: deviceChallengeNonce,
+      }),
+    );
+  }
+
+  /** App 免扫码连接第二步:校验设备证明(HMAC,role="app")。 */
+  function handleAppAuthResponse(record: {
+    deviceId?: unknown;
+    proof?: unknown;
+    client_ts?: unknown;
+  }): void {
+    const nonce = deviceChallengeNonce;
+    // nonce 一次性消费:无论成败都不可重放同一 challenge。
+    deviceChallengeNonce = null;
+    if (!nonce || !deviceId || record.deviceId !== deviceId) {
+      sendErrorAndClose("auth_failed");
+      return;
+    }
+    const verify = deviceRegistry.verifyDevice({
+      deviceId,
+      nonce,
+      proof: typeof record.proof === "string" ? record.proof : "",
+      clientTs: typeof record.client_ts === "number" ? record.client_ts : 0,
+    });
+    if (!verify.ok) {
+      sendErrorAndClose(verify.code);
+      return;
+    }
+    authMode = "device";
+    authed = true;
+    sendFrame(mobileAppAuthAckSchema.parse({ type: "app_auth_ack", pair_status: "paired" }));
+    logger.info(`[mobile-pairing] device authed, ${sessionLabel()}`);
+  }
+
+  /** 已认证会话上签发长期设备凭证(secret 仅此一次下发)。 */
+  function handleAppRegisterRequest(record: { deviceName?: unknown }): void {
+    const deviceName =
+      typeof record.deviceName === "string" && record.deviceName.trim()
+        ? record.deviceName.trim()
+        : "手机 App";
+    try {
+      const granted = deviceRegistry.registerDevice(deviceName);
+      sendFrame(
+        mobileAppRegisterGrantedSchema.parse({
+          type: "device_registered",
+          hostId: deviceRegistry.getHostId(),
+          deviceId: granted.deviceId,
+          deviceSecret: granted.deviceSecret,
+        }),
+      );
+      logger.info(`[mobile-pairing] device registered, name=${deviceName}`);
+    } catch (error) {
+      logger.warn("[mobile-pairing] device register failed", error);
+      sendErrorAndClose("internal_error", "device register failed");
+    }
   }
 
   return {
@@ -236,10 +331,17 @@ export function createMobilePairingSession(
         proof?: string;
         client_ts?: number;
         workspaceKey?: string;
+        hostId?: string;
+        deviceId?: string;
+        deviceName?: string;
       };
       if (authed) {
         if (record?.type === "bridge_request" && typeof record.workspaceKey === "string") {
           establishBridge(record.workspaceKey);
+          return;
+        }
+        if (record?.type === "app_register_request") {
+          handleAppRegisterRequest(record);
           return;
         }
         sendErrorAndClose("internal_error", "unsupported control frame after auth");
@@ -251,6 +353,14 @@ export function createMobilePairingSession(
       }
       if (record?.type === "auth_response") {
         handleAuthResponse(record);
+        return;
+      }
+      if (record?.type === "app_auth_init") {
+        handleAppAuthInit(record);
+        return;
+      }
+      if (record?.type === "app_auth_response") {
+        handleAppAuthResponse(record);
         return;
       }
       sendErrorAndClose("auth_failed", "auth required");

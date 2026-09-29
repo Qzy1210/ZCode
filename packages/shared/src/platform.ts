@@ -989,4 +989,18 @@ export interface IPlatformService {
 
   /** 停止移动端配对服务(桌面端可选能力;幂等)。 */
   mobilePairingStop?(): Promise<void>;
+
+  /** 列出已配对设备(App 免扫码凭证;桌面端可选能力)。 */
+  mobilePairingListDevices?(): Promise<MobileAppDeviceInfo[]>;
+
+  /** 吊销设备凭证(桌面端可选能力);App 端下次连接将收到 device_unknown。 */
+  mobilePairingRevokeDevice?(deviceId: string): Promise<boolean>;
+}
+
+/** 已配对手机 App 的设备信息(不含凭证密钥)。 */
+export interface MobileAppDeviceInfo {
+  deviceId: string;
+  name: string;
+  createdAt: number;
+  lastSeenAt: number;
 }

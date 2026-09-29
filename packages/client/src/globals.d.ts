@@ -326,6 +326,10 @@ declare global {
       >;
       /** 停止移动端配对服务（幂等） */
       mobilePairingStop?(): Promise<void>;
+      /** 列出已配对设备（App 免扫码凭证） */
+      mobilePairingListDevices?(): Promise<import("@zcode/shared").MobileAppDeviceInfo[]>;
+      /** 吊销设备凭证 */
+      mobilePairingRevokeDevice?(deviceId: string): Promise<boolean>;
     };
   }
 }

@@ -1,8 +1,13 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { MOBILE_PAIRING_TTL_MS, type BotProvider } from "@zcode/shared";
-import { Bot as BotIcon, MonitorSmartphone, Power, QrCode, RefreshCw, XIcon } from "lucide-react";
+import { Bot as BotIcon, MonitorSmartphone, XIcon } from "lucide-react";
 import { BotsDialog } from "@/BotsDialog.js";
+import {
+  MobilePairingQrSection,
+  PairedDevicesSection,
+  type MobilePairingDeviceSummary,
+} from "@/WebRemoteControlSections.js";
 import { ProviderIcon } from "@/BotsDialog/shared.js";
 import { Button } from "@/components/ui/button.js";
 import {
@@ -54,6 +59,7 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
   const [qrStopped, setQrStopped] = useState(false);
   const [qrIssuedAt, setQrIssuedAt] = useState<number | null>(null);
   const [qrExpired, setQrExpired] = useState(false);
+  const [devices, setDevices] = useState<MobilePairingDeviceSummary[]>([]);
 
   const generateQr = useCallback(
     async (regenerate: boolean) => {
@@ -117,7 +123,19 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
     // 桌面应用退出或用户显式"停止远控"时断开。
     if (!open) return;
     void generateQr(false);
-  }, [open, generateQr]);
+    void platform.mobilePairingListDevices?.().then(setDevices).catch(() => {});
+  }, [open, generateQr, platform]);
+
+  const handleRevokeDevice = useCallback(
+    async (deviceId: string) => {
+      const revoked = await platform.mobilePairingRevokeDevice?.(deviceId);
+      if (revoked) {
+        setDevices((current) => current.filter((device) => device.deviceId !== deviceId));
+        logger.info("[WebRemoteControlDialog] 已吊销设备凭证");
+      }
+    },
+    [platform],
+  );
 
   useEffect(() => {
     // 当前二维码到期即切换到"已过期"态,防止屏幕上残留的二维码被扫后认证失败。
@@ -189,107 +207,20 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
             </DialogHeader>
 
             <div className="mt-5 grid gap-4">
-              <section className="flex flex-col rounded-xl border border-border bg-card p-4">
-                <div className="mb-4 flex items-start gap-2">
-                  <QrCode className="mt-0.5 size-4 shrink-0 text-foreground-subtle" />
-                  <div className="min-w-0 space-y-1">
-                    <div className="text-ui-base font-medium text-foreground">
-                      {intl.formatMessage({ id: "webRemoteControl.qr.title" })}
-                    </div>
-                    <p className="text-ui-base/relaxed text-foreground-subtle">
-                      {intl.formatMessage({ id: "webRemoteControl.qr.description" })}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex min-h-[260px] flex-1 items-center justify-center rounded-lg bg-surface p-4">
-                  {qrLoading ? (
-                    <div className="size-8 animate-spin rounded-full border-2 border-border border-t-primary" />
-                  ) : qrImageUrl && !qrExpired ? (
-                    <img
-                      src={qrImageUrl}
-                      alt="mobile pairing qr"
-                      className="size-[220px] rounded-lg bg-white p-1"
-                    />
-                  ) : qrImageUrl && qrExpired ? (
-                    <div className="max-w-xs space-y-2 text-center">
-                      <p className="text-ui-sm text-foreground-subtle">
-                        {intl.formatMessage({ id: "webRemoteControl.qr.expiredHint" })}
-                      </p>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void generateQr(true)}
-                      >
-                        <RefreshCw className="size-3.5" />
-                        {intl.formatMessage({ id: "webRemoteControl.qr.regenerate" })}
-                      </Button>
-                    </div>
-                  ) : qrStopped ? (
-                    <div className="max-w-xs space-y-2 text-center">
-                      <p className="text-ui-sm text-foreground-subtle">
-                        {intl.formatMessage({ id: "webRemoteControl.qr.stoppedHint" })}
-                      </p>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void generateQr(true)}
-                      >
-                        <RefreshCw className="size-3.5" />
-                        {intl.formatMessage({ id: "webRemoteControl.qr.regenerate" })}
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="max-w-xs space-y-2 text-center">
-                      <p className="text-ui-sm text-foreground-subtle">{qrError ?? "二维码不可用"}</p>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void generateQr(true)}
-                      >
-                        <RefreshCw className="size-3.5" />
-                        {intl.formatMessage({ id: "webRemoteControl.qr.retry" })}
-                      </Button>
-                    </div>
-                  )}
-                </div>
-                {qrImageUrl && !qrExpired ? (
-                  <div className="mt-3 flex items-center justify-between gap-2">
-                    <p className="min-w-0 text-ui-xs text-foreground-subtle">
-                      {intl.formatMessage({
-                        id:
-                          qrMode === "relay"
-                            ? "webRemoteControl.qr.hint.relay"
-                            : "webRemoteControl.qr.hint.lan",
-                      })}
-                    </p>
-                    <div className="flex shrink-0 items-center gap-1">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={qrLoading}
-                        onClick={() => void generateQr(true)}
-                      >
-                        <RefreshCw className="size-3.5" />
-                        {intl.formatMessage({ id: "webRemoteControl.qr.regenerate" })}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={qrLoading}
-                        onClick={() => void handleStopQr()}
-                      >
-                        <Power className="size-3.5" />
-                        {intl.formatMessage({ id: "webRemoteControl.qr.stop" })}
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
-              </section>
+              <MobilePairingQrSection
+                qrLoading={qrLoading}
+                qrImageUrl={qrImageUrl}
+                qrExpired={qrExpired}
+                qrStopped={qrStopped}
+                qrError={qrError}
+                qrMode={qrMode}
+                onRegenerate={() => void generateQr(true)}
+                onStop={() => void handleStopQr()}
+              />
+              <PairedDevicesSection
+                devices={devices}
+                onRevoke={(deviceId) => void handleRevokeDevice(deviceId)}
+              />
               <section className="flex min-h-[360px] flex-col rounded-xl border border-border bg-card p-4">
                 <div className="mb-4 flex items-start gap-2">
                   <BotIcon className="mt-0.5 size-4 shrink-0 text-foreground-subtle" />
