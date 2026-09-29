@@ -35,7 +35,8 @@
             "usesCleartextTraffic": true
           }
         }
-      ]
+      ],
+      "expo-secure-store"
     ],
     "androidNavigationBar": {
       "backgroundColor": "#161616",

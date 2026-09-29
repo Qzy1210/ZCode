@@ -1,17 +1,22 @@
-/* 手机 App 的配对传输层:WS 控制面(JSON 文本帧)+ 数据面(二进制帧,SocketProtocol 线格式)。
+/* 手机 App 的连接传输层(双模式):WS 控制面(JSON 文本帧)+ 数据面(二进制帧,SocketProtocol 线格式)。
  *
- * 与 packages/web/src/remote/mobilePairingTransport.ts 同协议、同帧格式,
- * 仅把浏览器耦合点换成 RN 可用实现(Hermes 的 URL/btoa/TextEncoder 由 polyfills 兜底)。
- *
- * - 控制帧:auth_init / auth_challenge / auth_response / auth_ack / error /
- *   bridge_request / bridge_ready。
- * - 数据帧:二进制,13B SocketProtocol Regular 头 + RPC body;经 ISocket 适配后
- *   直接交给 @zcode/rpc SocketProtocol 复用,ChannelClient 零改动。
+ * - pairing 模式:扫二维码建立会话(10 分钟 TTL),与 web 端 /remote 同协议;
+ * - device 模式:用 SecureStore 中的长期凭证免扫码连接(hostId 经 relay 路由)。
+ * 两者认证完成后共用同一条桥接/数据面链路,协议帧与桌面 mobilePairingSession 对偶。
  */
-import { Emitter, VSBuffer, SocketProtocol, type ISocket } from "@zcode/rpc";
-import { MOBILE_PAIRING_AUTH_ROLE, calculateMobilePairingProofPure } from "@zcode/shared";
+import { Emitter, VSBuffer, type ISocket } from "@zcode/rpc";
+import {
+  MOBILE_APP_AUTH_ROLE,
+  MOBILE_PAIRING_AUTH_ROLE,
+  calculateMobilePairingProofPure,
+} from "@zcode/shared";
 
+import type { DeviceCredential } from "./deviceCredential";
 import type { PairingQrPayload } from "./pairingQr";
+
+export type ConnectionAuth =
+  | { mode: "pairing"; qr: PairingQrPayload }
+  | { mode: "device"; credential: DeviceCredential };
 
 export type PairingTransportPhase =
   | "connecting"
@@ -25,24 +30,44 @@ export interface PairingTransportEvents {
   error?: { code: string; message?: string };
 }
 
+export interface IssuedDeviceCredential {
+  hostId: string;
+  deviceId: string;
+  deviceSecret: string;
+}
+
 export interface PairingTransport {
   readonly socket: ISocket;
   readonly onPhaseChange: (listener: (event: PairingTransportEvents) => void) => () => void;
   /** 发起认证与桥接;resolve 于 bridge_ready,reject 于 error/关闭。 */
   connect(): Promise<ISocket>;
+  /**
+   * 仅在扫码(pairing)会话认证成功后可用:请求桌面签发长期设备凭证。
+   * 拿到后应写入 SecureStore,后续用 device 模式免扫码连接。
+   */
+  requestDeviceCredential(deviceName: string): Promise<IssuedDeviceCredential>;
   dispose(): void;
 }
 
-export function createPairingTransport(params: {
-  qr: PairingQrPayload;
-  /** 二维码所在服务 origin(relay 或局域网桌面服务)。 */
+export function createConnectionTransport(params: {
+  auth: ConnectionAuth;
+  /** 二维码/凭证对应的服务 origin(relay 或局域网桌面服务)。 */
   serverOrigin: string;
 }): PairingTransport {
-  const { qr, serverOrigin } = params;
+  const { auth, serverOrigin } = params;
+  const isDeviceMode = auth.mode === "device";
+  const authRole = isDeviceMode ? MOBILE_APP_AUTH_ROLE : MOBILE_PAIRING_AUTH_ROLE;
+  const authId = isDeviceMode ? auth.credential.deviceId : auth.qr.sid;
+  const authSecret = isDeviceMode ? auth.credential.deviceSecret : auth.qr.hash;
+
   const phaseEmitter = new Emitter<PairingTransportEvents>();
   let ws: WebSocket | null = null;
   let disposed = false;
   let settled = false;
+  let pendingCredentialRequest: {
+    resolve: (credential: IssuedDeviceCredential) => void;
+    reject: (error: Error) => void;
+  } | null = null;
 
   // 数据面缓冲:认证/桥接完成前收到的二进制帧先排队,SocketProtocol 建立后回放。
   const pendingBinary: ArrayBuffer[] = [];
@@ -108,14 +133,22 @@ export function createPairingTransport(params: {
       };
 
       sock.addEventListener("open", () => {
-        // 认证必须由手机发起:auth_init 是按 sid 路由的唯一依据。
+        // 认证必须由手机发起:两种模式的发起帧不同,其余帧格式共用。
         sock.send(
-          JSON.stringify({
-            type: "auth_init",
-            role: MOBILE_PAIRING_AUTH_ROLE,
-            device_sid: qr.sid,
-            meta: { platform: "app", version: qr.appVersion || "app", name: "zcode-app" },
-          }),
+          JSON.stringify(
+            isDeviceMode
+              ? {
+                  type: "app_auth_init",
+                  hostId: auth.credential.hostId,
+                  deviceId: auth.credential.deviceId,
+                }
+              : {
+                  type: "auth_init",
+                  role: MOBILE_PAIRING_AUTH_ROLE,
+                  device_sid: auth.qr.sid,
+                  meta: { platform: "app", version: auth.qr.appVersion || "app", name: "zcode-app" },
+                },
+          ),
         );
       });
 
@@ -129,6 +162,10 @@ export function createPairingTransport(params: {
       sock.addEventListener("close", () => {
         onClose.fire();
         onEnd.fire();
+        if (pendingCredentialRequest) {
+          pendingCredentialRequest.reject(new Error("connection closed"));
+          pendingCredentialRequest = null;
+        }
         if (!settled) {
           settle(new Error("connection closed before ready"));
           fail("desktop_disconnected", "connection closed");
@@ -160,30 +197,55 @@ export function createPairingTransport(params: {
           code?: string;
           message?: string;
           workspaceKey?: string;
+          hostId?: string;
+          deviceId?: string;
+          deviceSecret?: string;
         };
         switch (frame?.type) {
-          case "auth_challenge": {
+          case "auth_challenge":
+          case "app_auth_challenge": {
             phaseEmitter.fire({ phase: "authenticating" });
             const proof = calculateMobilePairingProofPure(
-              qr.hash,
+              authSecret,
               frame.nonce ?? "",
-              MOBILE_PAIRING_AUTH_ROLE,
-              qr.sid,
+              authRole,
+              authId,
             );
             sock.send(
-              JSON.stringify({
-                type: "auth_response",
-                device_sid: qr.sid,
-                proof,
-                client_ts: Date.now(),
-              }),
+              JSON.stringify(
+                isDeviceMode
+                  ? {
+                      type: "app_auth_response",
+                      deviceId: authId,
+                      proof,
+                      client_ts: Date.now(),
+                    }
+                  : { type: "auth_response", device_sid: authId, proof, client_ts: Date.now() },
+              ),
             );
             return;
           }
-          case "auth_ack": {
+          case "auth_ack":
+          case "app_auth_ack": {
             phaseEmitter.fire({ phase: "bridging" });
             // 单窗口直连:workspaceKey 用 default;桌面侧仅回显。
             sock.send(JSON.stringify({ type: "bridge_request", workspaceKey: "default" }));
+            return;
+          }
+          case "device_registered": {
+            if (
+              pendingCredentialRequest &&
+              typeof frame.hostId === "string" &&
+              typeof frame.deviceId === "string" &&
+              typeof frame.deviceSecret === "string"
+            ) {
+              pendingCredentialRequest.resolve({
+                hostId: frame.hostId,
+                deviceId: frame.deviceId,
+                deviceSecret: frame.deviceSecret,
+              });
+              pendingCredentialRequest = null;
+            }
             return;
           }
           case "bridge_ready": {
@@ -216,20 +278,32 @@ export function createPairingTransport(params: {
       return () => undefined;
     },
     connect,
+    requestDeviceCredential(deviceName: string): Promise<IssuedDeviceCredential> {
+      if (isDeviceMode) {
+        return Promise.reject(new Error("device credential already in use"));
+      }
+      if (!settled || ws?.readyState !== WebSocket.OPEN) {
+        return Promise.reject(new Error("connection not ready"));
+      }
+      if (pendingCredentialRequest) {
+        return Promise.reject(new Error("credential request already pending"));
+      }
+      return new Promise<IssuedDeviceCredential>((resolve, reject) => {
+        pendingCredentialRequest = { resolve, reject };
+        ws?.send(JSON.stringify({ type: "app_register_request", deviceName }));
+        // 超时兜底:8 秒未收到 device_registered 视为失败,不阻塞主流程。
+        setTimeout(() => {
+          if (pendingCredentialRequest) {
+            pendingCredentialRequest.reject(new Error("credential request timed out"));
+            pendingCredentialRequest = null;
+          }
+        }, 8_000);
+      });
+    },
     dispose() {
       disposed = true;
       ws?.close();
       phaseEmitter.dispose();
     },
   };
-}
-
-/** 便捷入口:完成握手后返回可直接喂 ChannelClient 的 protocol。 */
-export async function connectPairingTransport(params: {
-  qr: PairingQrPayload;
-  serverOrigin: string;
-}): Promise<SocketProtocol> {
-  const transport = createPairingTransport(params);
-  const socket = await transport.connect();
-  return new SocketProtocol(socket);
 }

@@ -67,4 +67,18 @@ export function ensureRuntimePolyfills(): void {
   if (typeof scope.btoa === "undefined") {
     scope.btoa = (input: string) => encodeBase64(input);
   }
+  // uuidv7(命令 ID / clientId)依赖 crypto.getRandomValues;Hermes 未必提供。
+  // 只补这一个方法:配对 proof 走纯 JS HMAC,不依赖 crypto.subtle。
+  const cryptoScope = scope.crypto as { getRandomValues?: unknown } | undefined;
+  if (!cryptoScope || typeof cryptoScope.getRandomValues !== "function") {
+    scope.crypto = {
+      ...cryptoScope,
+      getRandomValues: (target: Uint8Array) => {
+        for (let index = 0; index < target.length; index += 1) {
+          target[index] = Math.floor(Math.random() * 256);
+        }
+        return target;
+      },
+    };
+  }
 }

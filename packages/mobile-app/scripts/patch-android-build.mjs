@@ -5,7 +5,7 @@
  * 3) reactNativeArchitectures 只保留 arm64-v8a(真机唯一需要,构建时间/包体积大幅下降)
  * 用法:expo prebuild --platform android 之后、gradle 之前执行本脚本。
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -49,8 +49,17 @@ const props = readFileSync(gradlePropsPath, "utf8").replace(
   /^reactNativeArchitectures=.*$/m,
   "reactNativeArchitectures=arm64-v8a",
 );
-writeFileSync(gradlePropsPath, props, "utf8");
+// 5) 指向本机 JDK 17:RN/Expo 模块声明 Java 17 toolchain,而构建本身跑在 Android Studio
+//    的 JDK 21 上,Gradle 会去 Adoptium 下载 185MB JDK——受限网络下极易卡死。
+const LOCAL_JDK17 = "/opt/homebrew/Cellar/openjdk@17/17.0.19/libexec/openjdk.jdk/Contents/Home";
+const needJdkPath =
+  existsSync(LOCAL_JDK17) && !props.includes("org.gradle.java.installations.paths=");
+writeFileSync(
+  gradlePropsPath,
+  needJdkPath ? `${props.trimEnd()}\norg.gradle.java.installations.paths=${LOCAL_JDK17}\n` : props,
+  "utf8",
+);
 
 console.log(
-  `[patch-android] applied: sdk.dir=${SDK_DIR}, ndk=${NDK_VERSION} (root ext + app literal), abi=arm64-v8a`,
+  `[patch-android] applied: sdk.dir=${SDK_DIR}, ndk=${NDK_VERSION} (root ext + app literal), abi=arm64-v8a, jdk17=${needJdkPath ? LOCAL_JDK17 : "auto"}`,
 );

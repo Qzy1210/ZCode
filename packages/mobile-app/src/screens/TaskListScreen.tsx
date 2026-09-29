@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
-import { Alert, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import type { RemoteServiceAccess } from "@zcode/client";
 
 import { createTaskStore, workspaceKeyOf, type TaskStoreSnapshot } from "../taskStore";
@@ -20,6 +20,10 @@ type ListRow =
       title: string;
       status: string;
       updatedAt: number;
+      /** 打开会话所需的三元组:与 controller 任务行 meta 一致(taskId === sessionId)。 */
+      taskId: string;
+      workspacePath: string;
+      workspaceIdentity?: string;
     };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -37,10 +41,23 @@ function lastPathSegment(path: string): string {
 
 export function TaskListScreen({
   services,
+  connectionMode,
   onDisconnect,
+  onForgetDevice,
+  onOpenTask,
 }: {
   services: RemoteServiceAccess;
+  /** device = 免扫码长期凭证连接;pairing = 本次扫码建立。 */
+  connectionMode: "pairing" | "device";
   onDisconnect: () => void;
+  onForgetDevice: () => void;
+  /** 打开任务会话:由 App 切换到会话屏(P2)。 */
+  onOpenTask: (target: {
+    taskId: string;
+    title: string;
+    workspacePath: string;
+    workspaceIdentity?: string;
+  }) => void;
 }) {
   const store = useMemo(() => createTaskStore(services), [services]);
   useEffect(() => () => store.dispose(), [store]);
@@ -75,6 +92,9 @@ export function TaskListScreen({
           title: task.meta.title.trim() || "未命名任务",
           status: task.liveStatus,
           updatedAt: task.meta.updatedAt,
+          taskId: task.meta.taskId,
+          workspacePath: task.meta.workspacePath,
+          ...(task.meta.workspaceIdentity ? { workspaceIdentity: task.meta.workspaceIdentity } : {}),
         });
       }
     }
@@ -98,16 +118,23 @@ export function TaskListScreen({
             />
             <Text style={styles.statusText}>
               {snapshot.status === "ready"
-                ? `已连接 · ${snapshot.workspaces.length} 个工作区 · ${snapshot.tasks.length} 个任务`
+                ? `已连接${connectionMode === "device" ? "(免扫码)" : ""} · ${snapshot.workspaces.length} 个工作区 · ${snapshot.tasks.length} 个任务`
                 : snapshot.status === "loading"
                   ? "正在同步项目与任务…"
                   : "同步失败"}
             </Text>
           </View>
         </View>
-        <Pressable style={styles.disconnectButton} onPress={onDisconnect}>
-          <Text style={styles.disconnectText}>断开</Text>
-        </Pressable>
+        <View style={styles.headerActions}>
+          {connectionMode === "device" ? (
+            <Pressable style={styles.disconnectButton} onPress={onForgetDevice}>
+              <Text style={styles.disconnectText}>忘记设备</Text>
+            </Pressable>
+          ) : null}
+          <Pressable style={styles.disconnectButton} onPress={onDisconnect}>
+            <Text style={styles.disconnectText}>断开</Text>
+          </Pressable>
+        </View>
       </View>
 
       <FlatList
@@ -139,7 +166,12 @@ export function TaskListScreen({
             <Pressable
               style={styles.taskRow}
               onPress={() =>
-                Alert.alert(item.title, "会话视图将在下一阶段(P2)接入")
+                onOpenTask({
+                  taskId: item.taskId,
+                  title: item.title,
+                  workspacePath: item.workspacePath,
+                  ...(item.workspaceIdentity ? { workspaceIdentity: item.workspaceIdentity } : {}),
+                })
               }
             >
               <View
@@ -181,6 +213,7 @@ const styles = StyleSheet.create({
   statusRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   statusDot: { width: 6, height: 6, borderRadius: 3 },
   statusText: { color: theme.foregroundSubtle, fontSize: 12 },
+  headerActions: { flexDirection: "row", gap: 8 },
   disconnectButton: {
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,

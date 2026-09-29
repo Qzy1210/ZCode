@@ -7,7 +7,8 @@
     "start": "expo start --lan",
     "start:tunnel": "expo start --tunnel",
     "ios": "expo run:ios",
-    "lint": "oxlint App.tsx index.ts src"
+    "lint": "oxlint App.tsx index.ts src",
+    "verify:conversation": "node scripts/verify-conversation-store.mjs"
   },
   "dependencies": {
     "@zcode/client": "workspace:*",
@@ -16,6 +17,7 @@
     "expo": "^57.0.25",
     "expo-build-properties": "~57.0.22",
     "expo-camera": "~57.0.5",
+    "expo-secure-store": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
     "react-native": "0.86.3",
