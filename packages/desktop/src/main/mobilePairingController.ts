@@ -2,12 +2,15 @@ import type { UtilityProcess as ElectronUtilityProcess } from "electron";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, hostname as osHostname } from "node:os";
 import { resolve } from "node:path";
-import { buildMobilePairingQrUrl, ZCODE_VERSION, type MobilePairingManager } from "@zcode/shared";
+import { MOBILE_PAIRING_TTL_MS, buildMobilePairingQrUrl, ZCODE_VERSION } from "@zcode/shared";
 import type { MobilePairingRelayClientHandle } from "./mobilePairingRelayClient.js";
 import { createMobilePairingRelayClient } from "./mobilePairingRelayClient.js";
 import type { MobilePairingServerHandle } from "./mobilePairingServer.js";
 import { createMobilePairingServer } from "./mobilePairingServer.js";
-import { createMobilePairingManager } from "./mobilePairingManager.js";
+import {
+  createMobilePairingManager,
+  type MobilePairingManager,
+} from "./mobilePairingManager.js";
 
 /**
  * 移动端配对控制器(main 进程,双模式)。
@@ -52,8 +55,12 @@ export function resolveMobileRelayConfig(): MobileRelayConfig | null {
 }
 
 export interface MobilePairingController {
-  /** 启动(如未运行)并生成新二维码 URL(附模式信息供 UI 呈现)。 */
-  createQrUrl(): Promise<
+  /**
+   * 获取二维码 URL(附模式信息供 UI 呈现)。
+   * 缺省复用仍有效的旧二维码——重开弹窗不影响已扫码手机;
+   * regenerate=true 才签发新 sid(旧二维码与未连接页失效)。
+   */
+  createQrUrl(options?: { regenerate?: boolean }): Promise<
     ({ url: string } & { mode: "lan" | "relay" }) | { error: string }
   >;
   /** 停止服务并注销所有配对会话。幂等。 */
@@ -85,6 +92,8 @@ export function createMobilePairingController(
   let relayClient: MobilePairingRelayClientHandle | null = null;
   let pairingManager: MobilePairingManager | null = null;
   let relayRegistered = false;
+  /** 最近一次签发的二维码;有效期与服务存活期内复用,避免重开弹窗顶掉已连接手机。 */
+  let lastQr: { url: string; issuedAt: number; mode: "lan" | "relay" } | null = null;
 
   /** 构建二维码 URL(两模式共用):payload 由 pairingManager 签发。 */
   function buildQrUrl(
@@ -176,9 +185,25 @@ export function createMobilePairingController(
   }
 
   return {
-    async createQrUrl() {
+    async createQrUrl(options) {
+      // 复用语义:二维码仍在有效期且服务仍在运行时,重开弹窗返回同一张码——
+      // 已扫码/已连接的手机不受影响。只有显式"重新生成"才签发新 sid。
+      const regenerate = options?.regenerate === true;
+      const serviceRunning = relayConfig ? relayClient !== null : lanServer !== null;
+      if (
+        !regenerate &&
+        lastQr !== null &&
+        serviceRunning &&
+        Date.now() - lastQr.issuedAt < MOBILE_PAIRING_TTL_MS
+      ) {
+        return { url: lastQr.url, mode: lastQr.mode };
+      }
       try {
-        return relayConfig ? await createQrUrlViaRelay() : await createQrUrlViaLan();
+        const result = relayConfig ? await createQrUrlViaRelay() : await createQrUrlViaLan();
+        if (!("error" in result)) {
+          lastQr = { url: result.url, issuedAt: Date.now(), mode: result.mode };
+        }
+        return result;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.warn(`[mobile-pairing] create qr failed: ${message}`);
@@ -186,6 +211,7 @@ export function createMobilePairingController(
       }
     },
     async stop() {
+      lastQr = null;
       const lanTarget = lanServer;
       lanServer = null;
       if (lanTarget) {

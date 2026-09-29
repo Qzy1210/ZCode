@@ -1,12 +1,11 @@
 import { hostname as osHostname, networkInterfaces } from "node:os";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
+import { ZCODE_VERSION, buildMobilePairingQrUrl } from "@zcode/shared";
 import {
-  ZCODE_VERSION,
-  buildMobilePairingQrUrl,
+  createMobilePairingManager,
   type MobilePairingManager,
-} from "@zcode/shared";
-import { createMobilePairingManager } from "./mobilePairingManager.js";
+} from "./mobilePairingManager.js";
 import { createMobilePairingWebAssets } from "./mobilePairingWebAssets.js";
 import {
   createMobilePairingSession,

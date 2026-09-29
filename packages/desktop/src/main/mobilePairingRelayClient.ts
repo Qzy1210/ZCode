@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import type { UtilityProcess as ElectronUtilityProcess } from "electron";
-import type { MobilePairingManager } from "@zcode/shared";
+import type { MobilePairingManager } from "./mobilePairingManager.js";
 import {
   createMobilePairingSession,
   type MobilePairingSession,

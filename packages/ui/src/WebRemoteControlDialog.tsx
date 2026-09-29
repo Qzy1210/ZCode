@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import QRCode from "qrcode";
 import type { BotProvider } from "@zcode/shared";
-import { Bot as BotIcon, MonitorSmartphone, QrCode, RefreshCw, XIcon } from "lucide-react";
+import { Bot as BotIcon, MonitorSmartphone, Power, QrCode, RefreshCw, XIcon } from "lucide-react";
 import { BotsDialog } from "@/BotsDialog.js";
 import { ProviderIcon } from "@/BotsDialog/shared.js";
 import { Button } from "@/components/ui/button.js";
@@ -51,42 +51,66 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
   const [qrError, setQrError] = useState<string | null>(null);
   const [qrLoading, setQrLoading] = useState(false);
   const [qrMode, setQrMode] = useState<"lan" | "relay" | null>(null);
+  const [qrStopped, setQrStopped] = useState(false);
 
-  const regenerateQr = useCallback(async () => {
-    if (!platform.mobilePairingCreateQr) {
-      setQrError("当前环境不支持移动端配对");
-      return;
-    }
+  const generateQr = useCallback(
+    async (regenerate: boolean) => {
+      if (!platform.mobilePairingCreateQr) {
+        setQrError("当前环境不支持移动端配对");
+        return;
+      }
+      setQrLoading(true);
+      setQrError(null);
+      try {
+        // regenerate=false 时复用未过期二维码:重开弹窗不顶掉已连接的手机。
+        const result = await platform.mobilePairingCreateQr({ regenerate });
+        if ("error" in result) {
+          setQrError(result.error);
+          setQrImageUrl(null);
+          setQrMode(null);
+          return;
+        }
+        setQrMode(result.mode);
+        const dataUrl = await QRCode.toDataURL(result.url, { margin: 1, width: 220 });
+        setQrImageUrl(dataUrl);
+        setQrStopped(false);
+        logger.info("[WebRemoteControlDialog] 移动端配对二维码已生成", {
+          mode: result.mode,
+          regenerate,
+        });
+      } catch (error) {
+        setQrError(error instanceof Error ? error.message : String(error));
+        setQrImageUrl(null);
+      } finally {
+        setQrLoading(false);
+      }
+    },
+    [platform],
+  );
+
+  const handleStopQr = useCallback(async () => {
+    if (!platform.mobilePairingStop) return;
     setQrLoading(true);
     setQrError(null);
     try {
-      const result = await platform.mobilePairingCreateQr();
-      if ("error" in result) {
-        setQrError(result.error);
-        setQrImageUrl(null);
-        setQrMode(null);
-        return;
-      }
-      setQrMode(result.mode);
-      const dataUrl = await QRCode.toDataURL(result.url, { margin: 1, width: 220 });
-      setQrImageUrl(dataUrl);
-      logger.info("[WebRemoteControlDialog] 移动端配对二维码已生成", { mode: result.mode });
+      await platform.mobilePairingStop();
+      setQrStopped(true);
+      setQrImageUrl(null);
+      setQrMode(null);
+      logger.info("[WebRemoteControlDialog] 移动端远控已停止");
     } catch (error) {
       setQrError(error instanceof Error ? error.message : String(error));
-      setQrImageUrl(null);
     } finally {
       setQrLoading(false);
     }
   }, [platform]);
 
   useEffect(() => {
-    // 打开弹窗即生成一次二维码;关闭时停止服务释放端口(会话不持久)。
+    // 打开弹窗:复用未过期的二维码;关闭弹窗不停服务——手机连接只在
+    // 桌面应用退出或用户显式"停止远控"时断开。
     if (!open) return;
-    void regenerateQr();
-    return () => {
-      void platform.mobilePairingStop?.().catch(() => {});
-    };
-  }, [open, regenerateQr, platform]);
+    void generateQr(false);
+  }, [open, generateQr]);
 
   const handleOpenBotEntry = (provider: RemoteControlBotProvider) => {
     setBotEntryProvider(provider);
@@ -167,6 +191,21 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
                       alt="mobile pairing qr"
                       className="size-[220px] rounded-lg bg-white p-1"
                     />
+                  ) : qrStopped ? (
+                    <div className="max-w-xs space-y-2 text-center">
+                      <p className="text-ui-sm text-foreground-subtle">
+                        {intl.formatMessage({ id: "webRemoteControl.qr.stoppedHint" })}
+                      </p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void generateQr(true)}
+                      >
+                        <RefreshCw className="size-3.5" />
+                        {intl.formatMessage({ id: "webRemoteControl.qr.regenerate" })}
+                      </Button>
+                    </div>
                   ) : (
                     <div className="max-w-xs space-y-2 text-center">
                       <p className="text-ui-sm text-foreground-subtle">{qrError ?? "二维码不可用"}</p>
@@ -174,7 +213,7 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
                         type="button"
                         variant="outline"
                         size="sm"
-                        onClick={() => void regenerateQr()}
+                        onClick={() => void generateQr(true)}
                       >
                         <RefreshCw className="size-3.5" />
                         {intl.formatMessage({ id: "webRemoteControl.qr.retry" })}
@@ -184,7 +223,7 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
                 </div>
                 {qrImageUrl ? (
                   <div className="mt-3 flex items-center justify-between gap-2">
-                    <p className="text-ui-xs text-foreground-subtle">
+                    <p className="min-w-0 text-ui-xs text-foreground-subtle">
                       {intl.formatMessage({
                         id:
                           qrMode === "relay"
@@ -192,16 +231,28 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
                             : "webRemoteControl.qr.hint.lan",
                       })}
                     </p>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={qrLoading}
-                      onClick={() => void regenerateQr()}
-                    >
-                      <RefreshCw className="size-3.5" />
-                      {intl.formatMessage({ id: "webRemoteControl.qr.regenerate" })}
-                    </Button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={qrLoading}
+                        onClick={() => void generateQr(true)}
+                      >
+                        <RefreshCw className="size-3.5" />
+                        {intl.formatMessage({ id: "webRemoteControl.qr.regenerate" })}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={qrLoading}
+                        onClick={() => void handleStopQr()}
+                      >
+                        <Power className="size-3.5" />
+                        {intl.formatMessage({ id: "webRemoteControl.qr.stop" })}
+                      </Button>
+                    </div>
                   </div>
                 ) : null}
               </section>

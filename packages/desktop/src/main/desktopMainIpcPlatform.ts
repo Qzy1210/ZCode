@@ -94,7 +94,7 @@ export function registerPlatformIpcHandlers(options: {
   deviceMid: string;
   /** 移动端局域网配对服务（懒启动；二维码生成入口）。 */
   mobilePairing?: {
-    createQrUrl: () => Promise<
+    createQrUrl: (options?: { regenerate?: boolean }) => Promise<
       ({ url: string } & { mode: "lan" | "relay" }) | { error: string }
     >;
     stop: () => Promise<void>;
@@ -393,11 +393,16 @@ export function registerPlatformIpcHandlers(options: {
   );
   ipcMain.handle(PlatformChannels.GetDeviceId, () => options.deviceMid);
   // 移动端配对:未提供控制器(如测试环境)时返回明确错误,不静默成功。
-  ipcMain.handle(PlatformChannels.MobilePairingCreateQr, async () => {
+  ipcMain.handle(PlatformChannels.MobilePairingCreateQr, async (_event, payload: unknown) => {
     if (!options.mobilePairing) {
       return { error: "mobile pairing is not available" };
     }
-    return options.mobilePairing.createQrUrl();
+    // payload 可选 { regenerate }:重开弹窗复用未过期二维码,显式"重新生成"才换新 sid。
+    const regenerate =
+      typeof payload === "object" &&
+      payload !== null &&
+      (payload as { regenerate?: unknown }).regenerate === true;
+    return options.mobilePairing.createQrUrl({ regenerate });
   });
   ipcMain.handle(PlatformChannels.MobilePairingStop, async () => {
     await options.mobilePairing?.stop();

@@ -7,10 +7,12 @@ import {
   mobilePairingAuthChallengeSchema,
   mobilePairingBridgeReadyFrameSchema,
   mobilePairingErrorFrameSchema,
-  type MobilePairingManager,
   type MobilePairingServerFrame,
 } from "@zcode/shared";
-import { generateMobilePairingAttachmentId } from "./mobilePairingManager.js";
+import {
+  generateMobilePairingAttachmentId,
+  type MobilePairingManager,
+} from "./mobilePairingManager.js";
 
 /**
  * 配对会话处理器:控制面状态机 + Host MessagePort 桥(数据面)。

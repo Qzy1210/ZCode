@@ -162,8 +162,8 @@ export function createDesktopPlatform(options: {
     setTitleBarTheme: (theme) => window.zcode.setTitleBarTheme(theme),
     getDeviceId: () =>
       (window as Window & { __ZCODE_DEVICE_ID__?: string }).__ZCODE_DEVICE_ID__ ?? "",
-    mobilePairingCreateQr: () =>
-      window.zcode.mobilePairingCreateQr?.() ??
+    mobilePairingCreateQr: (options?: { regenerate?: boolean }) =>
+      window.zcode.mobilePairingCreateQr?.(options) ??
       Promise.resolve({ error: "mobile pairing is not available" }),
     mobilePairingStop: () => window.zcode.mobilePairingStop?.() ?? Promise.resolve(),
   };
