@@ -57,7 +57,14 @@ import {
 } from "./turn-control.js";
 import { mergeToolExecutionTelemetry, readToolExecutionTelemetry } from "../handlers/tool-perf.js";
 import type { ToolExecuteOptions, ToolExecutorDeps } from "./types.js";
-import { validateInitialModelToolInput, validateInput, validateOutput } from "./validation.js";
+import {
+  getInputValidationFacts,
+  validateInitialModelToolInput,
+  validateInput,
+  validateOutput,
+} from "./validation.js";
+import { autoRepairToolInput } from "../input-auto-repair.js";
+import { recordToolInputValidationFailure } from "../input-validation-stats.js";
 import type { ExecutableToolCall } from "../types.js";
 import { resolveEmbeddedSearchBranchCapability } from "../../embedded-search/capability.js";
 import { resolveToolEntryModelContract } from "../model-contract.js";
@@ -169,6 +176,13 @@ async function executeToolCallImpl(
     logger: deps.logger,
   });
   let executionInput = preparedInitialInput.input;
+  // 自动修复层:可逆无害变换(剥离意外字段/无损标量强转)先于失败回传。
+  // 修复后仍不合法时 autoRepair 返回原值,继续走下方初始校验的失败路径。
+  // 注意:修复只针对模型原始输入;后续 hook/permission 修改的输入属另一生命周期。
+  const autoRepair = autoRepairToolInput(entry, executionInput, deps.logger);
+  if (autoRepair.repaired) {
+    executionInput = autoRepair.input;
+  }
   const initialInputValidation = validateInitialModelToolInput(
     executionInput,
     entry,
@@ -176,6 +190,23 @@ async function executeToolCallImpl(
   );
   if (initialInputValidation) {
     const result = createErrorResult(canonicalToolCall, initialInputValidation);
+    // 遥测计数:空入参与其他 schema 失败拆成独立维度(随工具 span 按工具聚合),
+    // 并记录自动修复层是否已应用过变换,用于判断"模型漏发/流式截断"还是修复不足。
+    const validationFacts = getInputValidationFacts(initialInputValidation);
+    if (validationFacts) {
+      telemetry?.setInputValidationFailure({
+        ...validationFacts,
+        autoRepaired: autoRepair.repaired,
+      });
+      // 本地统计(只落盘、不上报,~/.zcode/v2/tool-input-validation-stats.json):
+      // 给"减少该错误"的优化提供本地依据;写盘失败静默降级,不阻塞工具链路。
+      recordToolInputValidationFailure({
+        toolName: entry.metadata.name,
+        inputWasEmpty: validationFacts.inputWasEmpty,
+        issueCount: validationFacts.issueCount,
+        autoRepaired: autoRepair.repaired,
+      });
+    }
     // schema 失败与 registry miss 同属 handler/ToolCallStarted 之前的早退；旧代码
     // 只把失败回灌模型，没有发布 ToolCallError，V4 tool row 因而在整个 turn 里停在
     // inputStreaming（CreateWorkflow 卡持续显示「正在编写工作流」），模型重试后又叠一张。

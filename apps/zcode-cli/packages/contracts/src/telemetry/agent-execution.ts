@@ -221,6 +221,12 @@ export interface ToolExecutionSpanWriter extends AgentTelemetryScope {
   setPermissionDecision(decision: "granted" | "denied" | "not_required"): void;
   setOutputBytes(bytes: number): void;
   setOutputTruncated(truncated: boolean): void;
+  /**
+   * 输入 schema 校验失败时的补充维度(仅供诊断计数,不改变失败判定):
+   * 空入参(疑似流式截断/漏发)与普通缺字段、类型错误分开统计,便于判断真实来源;
+   * autoRepaired 记录自动修复层是否已应用过变换(修后仍失败 = 修复不足以救回该调用)。
+   */
+  setInputValidationFailure(detail: ToolInputValidationFailureDetail): void;
   startCommand(input: CommandTraceStart): CommandExecutionSpanWriter;
   finishCompleted(): void;
   finishDenied(reason: "user_denied" | "policy_denied" | "unavailable" | "unknown"): void;
@@ -230,6 +236,15 @@ export interface ToolExecutionSpanWriter extends AgentTelemetryScope {
     error?: unknown,
   ): void;
   finishCancelled(reason: AgentTelemetryCancellationReason): void;
+}
+
+export interface ToolInputValidationFailureDetail {
+  /** 入参完全为空(undefined/null/空对象),与"漏了某个字段"是不同的排查方向。 */
+  inputWasEmpty: boolean;
+  /** 校验问题条数(原始计数,未按展示上限截断)。 */
+  issueCount: number;
+  /** 自动修复层(剥离意外字段/无损标量强转)是否应用过变换。 */
+  autoRepaired: boolean;
 }
 
 export interface CommandExecutionSpanWriter extends AgentTelemetryScope {

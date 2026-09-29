@@ -40,6 +40,7 @@ import type {
   ResponseModelTelemetryDescriptor,
   TelemetryIdentitySnapshot,
   ToolExecutionSpanWriter,
+  ToolInputValidationFailureDetail,
   ToolTraceStart,
 } from "@zcode/contracts/telemetry";
 import {
@@ -916,6 +917,18 @@ class ToolWriter extends TrackedBaseWriter implements ToolExecutionSpanWriter {
     this.setAttribute("zcode.tool_execution.output_truncated", truncated);
   }
 
+  setInputValidationFailure(detail: ToolInputValidationFailureDetail): void {
+    this.setAttribute("zcode.tool_execution.input_validation.empty", detail.inputWasEmpty);
+    this.setAttribute(
+      "zcode.tool_execution.input_validation.issue_count",
+      finiteNonNegative(detail.issueCount),
+    );
+    this.setAttribute(
+      "zcode.tool_execution.input_validation.auto_repaired",
+      detail.autoRepaired,
+    );
+  }
+
   startCommand(input: CommandTraceStart): CommandExecutionSpanWriter {
     return this.createCommand({ ...input, parent: this });
   }
@@ -1567,6 +1580,7 @@ const NOOP_TOOL_WRITER: ToolExecutionSpanWriter = {
   finishDenied() {},
   finishFailed() {},
   markPermissionRequested() {},
+  setInputValidationFailure() {},
   setOutputBytes() {},
   setOutputTruncated() {},
   setPermissionDecision() {},

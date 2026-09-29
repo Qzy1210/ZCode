@@ -13,18 +13,29 @@ export function createInitialInputValidationModelContent(
   entry: ToolEntry,
   jsonIssues: readonly ToolInputValidationIssue[],
   runtimeIssues: readonly RuntimeInputValidationIssue[] | undefined,
+  options?: { inputWasEmpty?: boolean },
 ): string {
   const issues = projectInitialModelValidationIssues(entry.inputSchema, jsonIssues, runtimeIssues);
-  return `<tool_use_error>InputValidationError: ${formatToolInputValidationError(
-    entry.metadata.name,
-    issues,
-  )}</tool_use_error>`;
+  const detail = formatToolInputValidationError(entry.metadata.name, issues);
+  // 空入参(一个参数都没收到)常见于流式截断或模型漏发参数,只回"缺少某参数"不足以让模型
+  // 意识到这次调用整体没发出去;显式要求重发完整调用能减少连续空调用重试。
+  const emptyInputHint =
+    options?.inputWasEmpty === true
+      ? "\nNo parameters were received for this tool call; re-issue the call with all required parameters."
+      : "";
+  return `<tool_use_error>InputValidationError: ${detail}${emptyInputHint}</tool_use_error>`;
 }
 
-function formatToolInputValidationError(
-  toolName: string,
+interface ClassifiedToolInputValidationIssues {
+  missingParameters: string[];
+  unexpectedParameters: string[];
+  wrongTypes: Array<{ expected: string; param: string; received: string }>;
+}
+
+/** 把 JSON Schema 校验 issue 归类成 missing/unexpected/wrong-type 三类,模型文案与用户文案共用。 */
+function classifyToolInputValidationIssues(
   issues: readonly ToolInputValidationIssue[],
-): string {
+): ClassifiedToolInputValidationIssues {
   const missingParameters = issues
     .filter(
       (issue) => issue.code === "invalid_type" && issue.message.includes("received undefined"),
@@ -45,7 +56,15 @@ function formatToolInputValidationError(
       },
     ];
   });
+  return { missingParameters, unexpectedParameters, wrongTypes };
+}
 
+function formatToolInputValidationError(
+  toolName: string,
+  issues: readonly ToolInputValidationIssue[],
+): string {
+  const { missingParameters, unexpectedParameters, wrongTypes } =
+    classifyToolInputValidationIssues(issues);
   const lines: string[] = [
     ...missingParameters.map((parameter) => `The required parameter \`${parameter}\` is missing`),
     ...unexpectedParameters.map(
@@ -69,6 +88,53 @@ function formatToolInputValidationError(
       2,
     ) ?? "[]"
   );
+}
+
+function formatParameterList(parameters: readonly string[]): string {
+  const shown = parameters.slice(0, 3).map((parameter) => `"${parameter}"`);
+  if (parameters.length > 3) {
+    shown.push(`and ${parameters.length - 3} more`);
+  }
+  return shown.join(", ");
+}
+
+/**
+ * 单行摘要:用于 error.message(UI 与日志)。
+ * 既报"哪个工具"(Tool input failed inputSchema validation 原文里没有工具名),
+ * 也报"缺什么/类型错在哪",让用户不必展开模型侧的多行详情即可判断。
+ * 模型侧仍走 formatToolInputValidationError 的完整多行版本(modelContent)。
+ */
+export function summarizeToolInputValidationIssues(
+  toolName: string,
+  issues: readonly ToolInputValidationIssue[],
+): string | undefined {
+  const { missingParameters, unexpectedParameters, wrongTypes } =
+    classifyToolInputValidationIssues(issues);
+  const parts: string[] = [];
+  if (missingParameters.length > 0) {
+    parts.push(
+      `missing required ${
+        missingParameters.length > 1 ? "parameters" : "parameter"
+      } ${formatParameterList(missingParameters)}`,
+    );
+  }
+  const firstWrongType = wrongTypes[0];
+  if (firstWrongType) {
+    parts.push(
+      `parameter "${firstWrongType.param}" expected ${firstWrongType.expected}, got ${firstWrongType.received}`,
+    );
+  }
+  if (unexpectedParameters.length > 0) {
+    parts.push(
+      `unexpected ${
+        unexpectedParameters.length > 1 ? "parameters" : "parameter"
+      } ${formatParameterList(unexpectedParameters)}`,
+    );
+  }
+  if (parts.length === 0) {
+    return undefined;
+  }
+  return `${toolName} ${parts.slice(0, 3).join("; ")}`;
 }
 
 function projectInitialModelValidationIssues(

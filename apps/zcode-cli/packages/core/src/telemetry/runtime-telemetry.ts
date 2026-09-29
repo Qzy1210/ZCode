@@ -138,6 +138,7 @@ const NOOP_TOOL: ToolExecutionSpanWriter = {
   finishDenied() {},
   finishFailed() {},
   markPermissionRequested() {},
+  setInputValidationFailure() {},
   setOutputBytes() {},
   setOutputTruncated() {},
   setPermissionDecision() {},
