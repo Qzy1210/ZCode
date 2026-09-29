@@ -1,48 +1,23 @@
-/* ZCode 手机 App:首次扫码配对换取长期凭证,之后免扫码自动连接(P1),
- * 任务列表 → 会话视图(P2,历史 + 实时流式 + 发送)。 */
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+/* ZCode 手机 App 根组件:只做渲染与导航,连接生命周期交给 connectionRuntime。
+ *
+ * - 渲染分支:启动中 / 扫码配对 / 连接中 / 错误 / 就绪;
+ * - 就绪时按会话栈渲染任务列表或会话屏;子代理下钻在栈上叠加;
+ * - 连接代际(generation)作为屏幕 key:重连成功后屏幕重建,订阅与快照自动刷新;
+ * - 断线重连期间保留最后画面,顶部显示横条并禁用写入类操作。
+ */
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { AppState as RNAppState, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
-import { ChannelClient, SocketProtocol } from "@zcode/rpc";
-import { RemoteServiceAccess } from "@zcode/client";
 
-import {
-  clearDeviceCredential,
-  loadDeviceCredential,
-  saveDeviceCredential,
-  type DeviceCredential,
-} from "./src/deviceCredential";
+import { createConnectionRuntime } from "./src/connectionRuntime";
 import type { PairingQrPayload } from "./src/pairingQr";
-import {
-  createConnectionTransport,
-  type PairingTransport,
-  type PairingTransportPhase,
-} from "./src/pairingTransport";
 import { PairScreen } from "./src/screens/PairScreen";
 import { SessionScreen } from "./src/screens/SessionScreen";
 import { TaskListScreen } from "./src/screens/TaskListScreen";
 import { theme } from "./src/theme";
 
-type AppState =
-  | { kind: "booting" }
-  | { kind: "pair" }
-  | { kind: "connecting"; label: string; detail?: string; canCancel: boolean }
-  | { kind: "error"; code: string; hint: string; canRetryAuto: boolean }
-  | { kind: "ready"; services: RemoteServiceAccess; mode: "pairing" | "device" };
-
-const PHASE_COPY: Record<PairingTransportPhase, string> = {
-  connecting: "正在连接桌面…",
-  authenticating: "正在验证配对…",
-  bridging: "正在同步工作区…",
-  ready: "已连接",
-  closed: "连接已断开",
-};
-
-/** 免扫码自动重连退避序列;用尽后转手动入口。 */
-const RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 15_000, 30_000];
-
-/** 与 web 端 MobileRemotePage 的错误指引保持一致,并补充设备凭证相关码。 */
+/** 与 web 端 MobileRemotePage 的错误指引保持一致,并补充设备凭证与重连相关码。 */
 const ERROR_HINTS: Record<string, string> = {
   pair_expired: "配对链接已过期，请在桌面端重新生成二维码后重新扫码。",
   pair_unknown: "配对链接已失效，请重新扫码。",
@@ -54,10 +29,9 @@ const ERROR_HINTS: Record<string, string> = {
   relay_unavailable: "无法连接中继服务，请检查网络后重试。",
   connection_timeout: "连接超时，请确认手机与桌面端网络可达。",
   workspace_unavailable: "桌面端工作区暂不可用，请确认桌面窗口仍在运行。",
+  connection_superseded: "连接已在另一台手机上接管，本机已断开。如需继续使用，请重新扫码配对。",
+  manual_stop: "已停止自动重连，可点重试重新连接。",
 };
-
-/** 凭证失效类错误:清除本地凭证并回到扫码配对。 */
-const CREDENTIAL_INVALID_CODES = new Set(["device_unknown", "device_revoked", "auth_failed"]);
 
 /** 会话屏打开目标:任务行三元组(taskId === sessionId)。 */
 interface OpenTaskTarget {
@@ -68,178 +42,39 @@ interface OpenTaskTarget {
 }
 
 export default function App() {
-  const [state, setState] = useState<AppState>({ kind: "booting" });
-  /** 已打开的任务会话;null 表示停留在任务列表。 */
-  const [openTask, setOpenTask] = useState<OpenTaskTarget | null>(null);
-  const transportRef = useRef<PairingTransport | null>(null);
-  const clientRef = useRef<ChannelClient | null>(null);
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** 连接代际:自增即作废在途连接/重试,避免旧回调覆盖新状态。 */
-  const generationRef = useRef(0);
-
-  const deviceName = Platform.OS === "android" ? "Android 手机" : "手机 App";
-
-  const releaseConnection = useCallback((bumpGeneration = true) => {
-    if (bumpGeneration) generationRef.current += 1;
-    // 连接换代即离开会话:旧 services 已失效,回列表避免继续消费已废弃的订阅。
-    setOpenTask(null);
-    if (retryTimerRef.current) {
-      clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-    clientRef.current?.dispose();
-    clientRef.current = null;
-    transportRef.current?.dispose();
-    transportRef.current = null;
-  }, []);
-
-  const connectWithCredential = useCallback(
-    async (credential: DeviceCredential, attempt: number): Promise<void> => {
-      releaseConnection();
-      const generation = generationRef.current;
-      setState({
-        kind: "connecting",
-        label: attempt === 0 ? "正在连接桌面…" : "连接失败，自动重试中…",
-        ...(attempt === 0 ? {} : { detail: `即将进行第 ${attempt + 1} 次尝试` }),
-        canCancel: true,
-      });
-      const transport = createConnectionTransport({
-        auth: { mode: "device", credential },
-        serverOrigin: credential.relayOrigin,
-      });
-      transportRef.current = transport;
-      try {
-        const socket = await transport.connect();
-        if (generation !== generationRef.current) return;
-        const client = new ChannelClient(new SocketProtocol(socket));
-        clientRef.current = client;
-        setState({ kind: "ready", services: new RemoteServiceAccess(client), mode: "device" });
-      } catch (error: unknown) {
-        if (generation !== generationRef.current) return;
-        transportRef.current = null;
-        transport.dispose();
-        const code = String(
-          (error as { code?: string }).code ??
-            (error instanceof Error ? error.message : error),
-        );
-        if (CREDENTIAL_INVALID_CODES.has(code)) {
-          await clearDeviceCredential();
-          setState({ kind: "error", code, hint: ERROR_HINTS[code] ?? "请重新扫码配对。", canRetryAuto: false });
-          return;
-        }
-        const delay = RETRY_DELAYS_MS[attempt];
-        if (delay === undefined) {
-          setState({
-            kind: "error",
-            code,
-            hint: ERROR_HINTS[code] ?? "自动重连失败，请检查网络后重试，或重新扫码配对。",
-            canRetryAuto: true,
-          });
-          return;
-        }
-        setState({
-          kind: "connecting",
-          label: "连接失败，自动重试中…",
-          detail: `${Math.round(delay / 1000)} 秒后第 ${attempt + 2} 次尝试`,
-          canCancel: true,
-        });
-        retryTimerRef.current = setTimeout(() => {
-          retryTimerRef.current = null;
-          if (generation !== generationRef.current) return;
-          void connectWithCredential(credential, attempt + 1);
-        }, delay);
-      }
-    },
-    [releaseConnection],
+  const runtime = useMemo(
+    // 只在前台探活:后台不做无谓 RPC,既省电也避免系统回收时的假断线。
+    () => createConnectionRuntime({ isAppActive: () => RNAppState.currentState === "active" }),
+    [],
   );
-
-  // 启动:有凭证 → 免扫码直连;没有 → 扫码配对。
   useEffect(() => {
-    void (async () => {
-      const credential = await loadDeviceCredential();
-      if (!credential) {
-        setState({ kind: "pair" });
-        return;
-      }
-      await connectWithCredential(credential, 0);
-    })();
-    return () => releaseConnection();
-  }, [connectWithCredential, releaseConnection]);
+    runtime.start();
+    return () => runtime.dispose();
+  }, [runtime]);
+  const state = useSyncExternalStore(runtime.subscribe, runtime.getState, runtime.getState);
 
-  const handlePaired = useCallback(
-    async (qr: PairingQrPayload) => {
-      releaseConnection();
-      const generation = generationRef.current;
-      setState({ kind: "connecting", label: PHASE_COPY.connecting, canCancel: false });
-      const transport = createConnectionTransport({
-        auth: { mode: "pairing", qr },
-        serverOrigin: qr.origin,
-      });
-      transportRef.current = transport;
-      transport.onPhaseChange((event) => {
-        if (generation !== generationRef.current) return;
-        if (event.phase === "closed" && event.error) return;
-        setState((current) =>
-          current.kind === "connecting"
-            ? { ...current, label: PHASE_COPY[event.phase] ?? current.label }
-            : current,
-        );
-      });
-      try {
-        const socket = await transport.connect();
-        if (generation !== generationRef.current) return;
-        const client = new ChannelClient(new SocketProtocol(socket));
-        clientRef.current = client;
-        setState({ kind: "ready", services: new RemoteServiceAccess(client), mode: "pairing" });
-        // 领取长期凭证(最佳努力):失败只影响"下次是否免扫码",不影响本次使用。
-        void transport
-          .requestDeviceCredential(deviceName)
-          .then((issued) =>
-            saveDeviceCredential({
-              relayOrigin: qr.origin,
-              hostId: issued.hostId,
-              deviceId: issued.deviceId,
-              deviceSecret: issued.deviceSecret,
-              deviceName,
-              createdAt: Date.now(),
-            }),
-          )
-          .catch(() => {});
-      } catch (error: unknown) {
-        if (generation !== generationRef.current) return;
-        transportRef.current = null;
-        transport.dispose();
-        const code = String(
-          (error as { code?: string }).code ??
-            (error instanceof Error ? error.message : error),
-        );
-        setState({ kind: "error", code, hint: ERROR_HINTS[code] ?? "请在桌面端确认服务状态后重试。", canRetryAuto: false });
-      }
-    },
-    [deviceName, releaseConnection],
-  );
+  /**
+   * 已打开的会话栈(末位为当前屏):任务列表 → 会话 → 子代理会话……
+   * 用栈而不是单个会话,是因为子代理下钻要能逐层返回,且共用同一条连接。
+   */
+  const [sessionStack, setSessionStack] = useState<OpenTaskTarget[]>([]);
+  const openTask = sessionStack[sessionStack.length - 1] ?? null;
 
-  const handleForgetDevice = useCallback(async () => {
-    releaseConnection();
-    await clearDeviceCredential();
-    setState({ kind: "pair" });
-  }, [releaseConnection]);
+  useEffect(() => {
+    // 连接不可用时退回列表(会话订阅依赖连接,留着只会空转);
+    // 断线重连(generation 变化)不走这里——那时 state 仍是 ready,栈要保留。
+    if (state.kind !== "ready") setSessionStack([]);
+  }, [state.kind]);
 
-  const handleRetryFromError = useCallback(async () => {
-    releaseConnection();
-    const credential = await loadDeviceCredential();
-    if (!credential) {
-      setState({ kind: "pair" });
-      return;
-    }
-    await connectWithCredential(credential, 0);
-  }, [connectWithCredential, releaseConnection]);
+  const handlePaired = (qr: PairingQrPayload) => {
+    void runtime.connectWithQr(qr);
+  };
 
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
         <StatusBar style="light" />
-        {state.kind === "booting" ? (
+        {state.kind === "idle" ? (
           <View style={styles.center}>
             <Text style={styles.phaseText}>正在启动…</Text>
           </View>
@@ -252,7 +87,7 @@ export default function App() {
             <Text style={styles.phaseText}>{state.label}</Text>
             {state.detail ? <Text style={styles.detailText}>{state.detail}</Text> : null}
             {state.canCancel ? (
-              <Pressable style={styles.retryButton} onPress={() => void handleForgetDevice()}>
+              <Pressable style={styles.retryButton} onPress={() => void runtime.forgetDevice()}>
                 <Text style={styles.retryText}>改用扫码配对</Text>
               </Pressable>
             ) : null}
@@ -263,14 +98,14 @@ export default function App() {
           <View style={styles.center}>
             <Text style={styles.errorTitle}>无法连接桌面</Text>
             <Text style={styles.errorCode}>{state.code}</Text>
-            <Text style={styles.errorHint}>{state.hint}</Text>
+            <Text style={styles.errorHint}>{ERROR_HINTS[state.code] ?? "请重新扫码配对后再试。"}</Text>
             <View style={styles.errorActions}>
               {state.canRetryAuto ? (
-                <Pressable style={styles.retryButton} onPress={() => void handleRetryFromError()}>
+                <Pressable style={styles.retryButton} onPress={() => runtime.retryFromError()}>
                   <Text style={styles.retryText}>重试</Text>
                 </Pressable>
               ) : null}
-              <Pressable style={styles.retryButton} onPress={() => void handleForgetDevice()}>
+              <Pressable style={styles.retryButton} onPress={() => void runtime.forgetDevice()}>
                 <Text style={styles.retryText}>重新扫码配对</Text>
               </Pressable>
             </View>
@@ -278,29 +113,62 @@ export default function App() {
         ) : null}
 
         {state.kind === "ready" ? (
-          openTask ? (
-            <SessionScreen
-              services={state.services}
-              workspacePath={openTask.workspacePath}
-              {...(openTask.workspaceIdentity
-                ? { workspaceIdentity: openTask.workspaceIdentity }
-                : {})}
-              sessionId={openTask.taskId}
-              title={openTask.title}
-              onBack={() => setOpenTask(null)}
-            />
-          ) : (
-            <TaskListScreen
-              services={state.services}
-              connectionMode={state.mode}
-              onOpenTask={setOpenTask}
-              onDisconnect={() => {
-                releaseConnection();
-                setState({ kind: "pair" });
-              }}
-              onForgetDevice={() => void handleForgetDevice()}
-            />
-          )
+          <>
+            {state.banner ? (
+              <View style={styles.banner}>
+                <Text style={styles.bannerText} numberOfLines={2}>
+                  {state.banner.message}
+                </Text>
+                <Pressable
+                  style={styles.bannerAction}
+                  onPress={() => void runtime.forgetDevice()}
+                >
+                  <Text style={styles.bannerActionText}>重新扫码</Text>
+                </Pressable>
+                <Pressable style={styles.bannerAction} onPress={() => runtime.stopReconnect()}>
+                  <Text style={styles.bannerActionText}>停止重连</Text>
+                </Pressable>
+              </View>
+            ) : null}
+            {openTask ? (
+              <SessionScreen
+                // 连接代际入 key:重连成功后重建 store 与订阅,内容自动跟上。
+                key={`${openTask.taskId}#${state.generation}`}
+                services={state.services}
+                workspacePath={openTask.workspacePath}
+                {...(openTask.workspaceIdentity
+                  ? { workspaceIdentity: openTask.workspaceIdentity }
+                  : {})}
+                sessionId={openTask.taskId}
+                title={openTask.title}
+                reconnecting={state.banner !== null}
+                onBack={() => setSessionStack((stack) => stack.slice(0, -1))}
+                onOpenSession={({ sessionId, title }) =>
+                  setSessionStack((stack) => [
+                    ...stack,
+                    {
+                      taskId: sessionId,
+                      title,
+                      workspacePath: openTask.workspacePath,
+                      ...(openTask.workspaceIdentity
+                        ? { workspaceIdentity: openTask.workspaceIdentity }
+                        : {}),
+                    },
+                  ])
+                }
+              />
+            ) : (
+              <TaskListScreen
+                key={`tasks#${state.generation}`}
+                services={state.services}
+                connectionMode={state.mode}
+                reconnecting={state.banner !== null}
+                onOpenTask={(target) => setSessionStack([target])}
+                onDisconnect={() => runtime.disconnect()}
+                onForgetDevice={() => void runtime.forgetDevice()}
+              />
+            )}
+          </>
         ) : null}
       </SafeAreaView>
     </SafeAreaProvider>
@@ -324,4 +192,23 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   retryText: { color: theme.foreground, fontSize: 14 },
+  banner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: "rgba(245, 158, 11, 0.14)",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: theme.warning,
+  },
+  bannerText: { flex: 1, color: theme.warning, fontSize: 12 },
+  bannerAction: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.warning,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  bannerActionText: { color: theme.warning, fontSize: 12, fontWeight: "600" },
 });

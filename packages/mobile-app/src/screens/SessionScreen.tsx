@@ -21,6 +21,12 @@ import type { RemoteServiceAccess } from "@zcode/client";
 import type { ConversationRow } from "@zcode/shared/zcode-protocol-v4";
 
 import { createConversationStore, type ConversationView } from "../conversation/conversationStore";
+import {
+  resolveStopAvailability,
+  selectInteractionForDisplay,
+  summarizePlan,
+} from "../conversation/interactionModel";
+import { InteractionCard } from "./InteractionCard";
 import type { ConversationWorkspaceTarget } from "../conversation/conversationTransport";
 import { formatRelativeTime, theme } from "../theme";
 import { sessionStyles as styles } from "./sessionStyles";
@@ -78,13 +84,19 @@ export function SessionScreen({
   sessionId,
   title,
   onBack,
+  onOpenSession,
+  reconnecting = false,
 }: {
   services: RemoteServiceAccess;
   workspacePath: string;
   workspaceIdentity?: string;
   sessionId: string;
   title: string;
+  /** 连接断开重连中:保留画面但禁用写入,避免在死连接上发命令永久挂起。 */
+  reconnecting?: boolean;
   onBack: () => void;
+  /** 子代理下钻:打开另一个会话(同一连接,只切换订阅)。 */
+  onOpenSession?: (target: { sessionId: string; title: string }) => void;
 }) {
   // target 必须是稳定引用:store 依赖它建立订阅,每次渲染换对象会导致反复重订阅。
   const target = useMemo<ConversationWorkspaceTarget>(
@@ -120,6 +132,14 @@ export function SessionScreen({
     if (!stickToBottom.current) return;
     listRef.current?.scrollToEnd({ animated: false });
   }, []);
+
+  // 交互/控制面派生:协议判断都在纯函数里,这里只做 memo。
+  const interactionCard = useMemo(
+    () => selectInteractionForDisplay(view.pending),
+    [view.pending],
+  );
+  const stopAvailability = useMemo(() => resolveStopAvailability(view.control), [view.control]);
+  const planProgress = useMemo(() => summarizePlan(view.plan), [view.plan]);
 
   const handleSend = useCallback(async () => {
     const text = draft.trim();
@@ -197,17 +217,33 @@ export function SessionScreen({
           </View>
         );
       }
-      case "subagent":
-        return (
+      case "subagent": {
+        const childSessionId = item.childSessionId;
+        const canDrill = Boolean(childSessionId && onOpenSession);
+        const content = (
           <View style={styles.row}>
             <Text style={styles.rowHint}>
               子代理 · {SUBAGENT_STATUS_LABEL[item.status] ?? item.status}
+              {canDrill ? " · 点开查看" : ""}
             </Text>
             {item.summaryText.trim().length > 0 ? (
               <Text style={styles.toolOutput}>{truncateLines(item.summaryText, 3, 240)}</Text>
             ) : null}
           </View>
         );
+        // childSessionId 存在即可下钻:与桌面一致,子会话是独立订阅,不内嵌 child rows。
+        return canDrill ? (
+          <Pressable
+            onPress={() =>
+              onOpenSession?.({ sessionId: childSessionId!, title: `${item.subagentType} 子会话` })
+            }
+          >
+            {content}
+          </Pressable>
+        ) : (
+          content
+        );
+      }
       case "turnHeader":
         return (
           <View style={styles.turnDivider}>
@@ -246,15 +282,20 @@ export function SessionScreen({
       default:
         return null;
     }
-  }, []);
+  }, [onOpenSession]);
 
-  const statusLine = view.error
-    ? `同步异常：${view.error.message}`
-    : view.status === "loading"
-      ? "正在加载会话…"
-      : view.streaming
-        ? "生成中…"
-        : `共 ${view.rows.length} 行 · 最后更新 ${view.rows.length > 0 ? formatRelativeTime(view.rows[view.rows.length - 1]!.createdAt) : "—"}`;
+  const planSuffix = planProgress
+    ? ` · 计划 ${planProgress.completed}/${planProgress.total}`
+    : "";
+  const statusLine = reconnecting
+    ? "连接已断开，正在重连…"
+    : view.error
+      ? `同步异常：${view.error.message}`
+      : view.status === "loading"
+        ? "正在加载会话…"
+        : view.streaming
+          ? `生成中…${planSuffix}`
+          : `共 ${view.rows.length} 行 · 最后更新 ${view.rows.length > 0 ? formatRelativeTime(view.rows[view.rows.length - 1]!.createdAt) : "—"}${planSuffix}`;
 
   return (
     <KeyboardAvoidingView
@@ -281,7 +322,25 @@ export function SessionScreen({
             <Text style={styles.retryText}>重试</Text>
           </Pressable>
         ) : null}
+        {view.status === "ready" && stopAvailability.canStop ? (
+          <Pressable
+            style={styles.stopButton}
+            disabled={reconnecting || view.stop.state === "sending"}
+            onPress={() => void store.stopTurn()}
+          >
+            <Text style={styles.stopText}>
+              {view.stop.state === "sending"
+                ? "中断中"
+                : view.control?.stopState === "stopping"
+                  ? "正在停"
+                  : "中断"}
+            </Text>
+          </Pressable>
+        ) : null}
       </View>
+      {view.stop.state === "rejected" ? (
+        <Text style={styles.sendError}>{view.stop.message ?? "中断失败"}</Text>
+      ) : null}
 
       <FlatList
         ref={listRef}
@@ -294,6 +353,23 @@ export function SessionScreen({
           if (stickToBottom.current) scrollToEnd();
         }}
         ListHeaderComponent={
+          planProgress ? (
+            <View style={styles.planCard}>
+              <Text style={styles.planTitle}>
+                计划 {planProgress.completed}/{planProgress.total}
+                {planProgress.inProgress > 0 ? ` · ${planProgress.inProgress} 进行中` : ""}
+              </Text>
+              {planProgress.items.map((item) => (
+                <Text key={item.id} style={styles.planItem} numberOfLines={2}>
+                  {item.status === "completed" ? "✓" : item.status === "inProgress" ? "▸" : "·"}{" "}
+                  {item.content}
+                </Text>
+              ))}
+            </View>
+          ) : null
+        }
+        ListHeaderComponentStyle={styles.listHeader}
+        ListFooterComponent={
           view.rows.length > 0 && !view.atTop ? (
             <Pressable
               style={styles.loadOlder}
@@ -315,6 +391,16 @@ export function SessionScreen({
         }
       />
 
+      {interactionCard ? (
+        <InteractionCard
+          card={interactionCard}
+          busy={reconnecting || view.response.state === "sending"}
+          {...(view.response.state === "rejected" && view.response.message
+            ? { errorMessage: view.response.message }
+            : {})}
+          onRespond={(answer) => void store.respond(interactionCard.interactionId, answer)}
+        />
+      ) : null}
       {view.send.state === "rejected" ? (
         <Text style={styles.sendError}>{view.send.message ?? "发送失败"}</Text>
       ) : null}
@@ -326,14 +412,16 @@ export function SessionScreen({
           placeholder="输入消息…"
           placeholderTextColor={theme.foregroundSubtle}
           multiline
-          editable={view.status !== "error"}
+          editable={view.status !== "error" && !reconnecting}
         />
         <Pressable
           style={[
             styles.sendButton,
-            draft.trim().length === 0 || view.send.state === "sending" ? styles.sendButtonDisabled : null,
+            draft.trim().length === 0 || view.send.state === "sending" || reconnecting
+              ? styles.sendButtonDisabled
+              : null,
           ]}
-          disabled={draft.trim().length === 0 || view.send.state === "sending"}
+          disabled={draft.trim().length === 0 || view.send.state === "sending" || reconnecting}
           onPress={() => void handleSend()}
         >
           <Text style={styles.sendText}>{view.send.state === "sending" ? "发送中" : "发送"}</Text>

@@ -45,10 +45,13 @@ export function TaskListScreen({
   onDisconnect,
   onForgetDevice,
   onOpenTask,
+  reconnecting = false,
 }: {
   services: RemoteServiceAccess;
   /** device = 免扫码长期凭证连接;pairing = 本次扫码建立。 */
   connectionMode: "pairing" | "device";
+  /** 连接断开重连中:状态点转黄并如实提示。 */
+  reconnecting?: boolean;
   onDisconnect: () => void;
   onForgetDevice: () => void;
   /** 打开任务会话:由 App 切换到会话屏(P2)。 */
@@ -112,16 +115,18 @@ export function TaskListScreen({
                 styles.statusDot,
                 {
                   backgroundColor:
-                    snapshot.status === "ready" ? theme.success : theme.warning,
+                    reconnecting || snapshot.status !== "ready" ? theme.warning : theme.success,
                 },
               ]}
             />
             <Text style={styles.statusText}>
-              {snapshot.status === "ready"
-                ? `已连接${connectionMode === "device" ? "(免扫码)" : ""} · ${snapshot.workspaces.length} 个工作区 · ${snapshot.tasks.length} 个任务`
-                : snapshot.status === "loading"
-                  ? "正在同步项目与任务…"
-                  : "同步失败"}
+              {reconnecting
+                ? "连接已断开，正在重连…"
+                : snapshot.status === "ready"
+                  ? `已连接${connectionMode === "device" ? "(免扫码)" : ""} · ${snapshot.workspaces.length} 个工作区 · ${snapshot.tasks.length} 个任务`
+                  : snapshot.status === "loading"
+                    ? "正在同步项目与任务…"
+                    : "同步失败"}
             </Text>
           </View>
         </View>
