@@ -18,6 +18,10 @@ const MIME_BY_EXT: Record<string, string> = {
   ".map": "application/json",
 };
 
+/** index.html 每次回源校验;哈希资源永久缓存(与 relay 端一致,避免手机页刷新重下全部 JS)。 */
+const INDEX_CACHE_CONTROL = "no-cache";
+const HASHED_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
+
 export interface MobilePairingWebAssets {
   /** SPA:/remote 与未知路径回 index.html;assets 精确匹配。 */
   serve(res: ServerResponse, pathname: string): Promise<void>;
@@ -44,7 +48,7 @@ export function createMobilePairingWebAssets(webDistDir?: string): MobilePairing
       const index = await readFile(join(webRoot, "index.html"));
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store",
+        "Cache-Control": INDEX_CACHE_CONTROL,
       });
       res.end(index);
     } catch {
@@ -75,7 +79,7 @@ export function createMobilePairingWebAssets(webDistDir?: string): MobilePairing
       try {
         const content = await readFile(absolute);
         const mime = MIME_BY_EXT[extname(absolute)] ?? "application/octet-stream";
-        res.writeHead(200, { "Content-Type": mime, "Cache-Control": "no-store" });
+        res.writeHead(200, { "Content-Type": mime, "Cache-Control": HASHED_ASSET_CACHE_CONTROL });
         res.end(content);
       } catch {
         // 静态资源缺失回退到 index.html,由前端路由接管。
