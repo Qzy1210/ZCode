@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "ZCode",
+    "slug": "zcode-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#161616",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "dev.zcode.mobile",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
+      }
+    },
+    "android": {
+      "package": "dev.zcode.mobile"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "用于扫描桌面端二维码完成配对"
+        }
+      ],
+      "expo-status-bar",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "ndkVersion": "28.2.13676358",
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "androidNavigationBar": {
+      "backgroundColor": "#161616",
+      "barStyle": "light-content"
+    }
+  }
+}

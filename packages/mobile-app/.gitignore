@@ -1,0 +1,6 @@
+# prebuild 生成的原生工程(由 app.json + config plugins 决定,不入库)
+/android
+/ios
+# Expo / Metro 产物
+.expo/
+dist/

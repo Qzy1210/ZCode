@@ -1,0 +1,27 @@
+{
+  "name": "@zcode/mobile-app",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start --lan",
+    "start:tunnel": "expo start --tunnel",
+    "ios": "expo run:ios",
+    "lint": "oxlint App.tsx index.ts src"
+  },
+  "dependencies": {
+    "@zcode/client": "workspace:*",
+    "@zcode/rpc": "workspace:*",
+    "@zcode/shared": "workspace:*",
+    "expo": "^57.0.25",
+    "expo-build-properties": "~57.0.22",
+    "expo-camera": "~57.0.5",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-safe-area-context": "~5.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0"
+  }
+}
