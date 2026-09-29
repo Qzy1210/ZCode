@@ -18,7 +18,14 @@ import {
   type ConversationTopicFrame,
   type ConversationTopicWireCandidate,
   type TopicFrameDeliveryKind,
+  type CommandPayloadMap,
 } from "@zcode/shared/zcode-protocol-v4";
+
+/**
+ * 交互应答形状直接从命令 payload schema 派生(shared 是协议唯一来源),
+ * 避免 App 自己声明一份可能漂移的类型。
+ */
+export type InteractionAnswer = CommandPayloadMap["resolveInteraction"]["answer"];
 import {
   createAckActivationBarrier,
   createTopicWireDecoder,
@@ -56,6 +63,10 @@ export interface ConversationTransport {
   unsubscribe(subscription: ConversationSubscription): Promise<void>;
   loadOlder(sessionId: string, beforeRowId: number, limit: number): Promise<OlderRowsPage>;
   sendText(sessionId: string, text: string): Promise<CommandAck>;
+  /** 审批/问答/计划批准的应答;answer 形状由 interactionModel 构造。 */
+  resolveInteraction(sessionId: string, interactionId: string, answer: InteractionAnswer): Promise<CommandAck>;
+  /** 中断当前 turn;expectedForegroundExecutionId 取自 control.activeWorks。 */
+  stop(sessionId: string, expectedForegroundExecutionId?: string): Promise<CommandAck>;
   onFrame(
     listener: (frame: ConversationTopicFrame, deliveryKind: TopicFrameDeliveryKind) => void,
   ): void;
@@ -102,6 +113,24 @@ export function createConversationTransport(params: {
     if (disposed) return;
     barrier.accept(wire);
   });
+
+  /** 所有命令共用同一个信封工厂:clientId 必须与握手绑定值一致,否则桌面报 clientMismatch。 */
+  function sendCommand(
+    command: { type: "sendText"; payload: unknown } | { type: "resolveInteraction"; payload: unknown } | { type: "stop"; payload: unknown },
+    sessionId: string,
+  ): Promise<CommandAck> {
+    return agent.sendConversationCommandV4({
+      ...workspace,
+      envelope: {
+        commandId: uuidv7(),
+        clientId,
+        sessionId,
+        type: command.type,
+        payload: command.payload,
+        issuedAt: Date.now(),
+      },
+    });
+  }
 
   return {
     async subscribeSession(sessionId, options) {
@@ -164,17 +193,19 @@ export function createConversationTransport(params: {
       return { rows: result.rows, hasMore: result.hasMore, atLogEpoch: result.atLogEpoch };
     },
     async sendText(sessionId, text) {
-      return agent.sendConversationCommandV4({
-        ...workspace,
-        envelope: {
-          commandId: uuidv7(),
-          clientId,
-          sessionId,
-          type: "sendText",
-          payload: { text },
-          issuedAt: Date.now(),
+      return sendCommand({ type: "sendText", payload: { text } }, sessionId);
+    },
+    async resolveInteraction(sessionId, interactionId, answer) {
+      return sendCommand({ type: "resolveInteraction", payload: { interactionId, answer } }, sessionId);
+    },
+    async stop(sessionId, expectedForegroundExecutionId) {
+      return sendCommand(
+        {
+          type: "stop",
+          payload: expectedForegroundExecutionId ? { expectedForegroundExecutionId } : {},
         },
-      });
+        sessionId,
+      );
     },
     onFrame(listener) {
       frameListeners.add(listener);

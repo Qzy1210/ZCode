@@ -28,6 +28,9 @@ export type PairingTransportPhase =
 export interface PairingTransportEvents {
   phase: PairingTransportPhase;
   error?: { code: string; message?: string };
+  /** ready 之后的关闭:透传 relay/网络给的 CloseEvent 事实,供重连策略分类。 */
+  closeCode?: number;
+  closeReason?: string;
 }
 
 export interface IssuedDeviceCredential {
@@ -38,7 +41,13 @@ export interface IssuedDeviceCredential {
 
 export interface PairingTransport {
   readonly socket: ISocket;
+  /** 返回退订函数:每次重连都新建 transport,若不退订会叠加监听器。 */
   readonly onPhaseChange: (listener: (event: PairingTransportEvents) => void) => () => void;
+  /**
+   * 任何入站消息(控制帧/二进制帧)都会触发:这是"连接还活着"的唯一证据,
+   * 探活看门狗据此判断是否需要主动探针。
+   */
+  readonly onActivity: (listener: (at: number) => void) => () => void;
   /** 发起认证与桥接;resolve 于 bridge_ready,reject 于 error/关闭。 */
   connect(): Promise<ISocket>;
   /**
@@ -61,6 +70,7 @@ export function createConnectionTransport(params: {
   const authSecret = isDeviceMode ? auth.credential.deviceSecret : auth.qr.hash;
 
   const phaseEmitter = new Emitter<PairingTransportEvents>();
+  const activityEmitter = new Emitter<number>();
   let ws: WebSocket | null = null;
   let disposed = false;
   let settled = false;
@@ -159,22 +169,33 @@ export function createConnectionTransport(params: {
         }
       });
 
-      sock.addEventListener("close", () => {
+      sock.addEventListener("close", (event) => {
         onClose.fire();
         onEnd.fire();
         if (pendingCredentialRequest) {
           pendingCredentialRequest.reject(new Error("connection closed"));
           pendingCredentialRequest = null;
         }
+        // relay 会用 4000 + reason 说明关闭原因(superseded / host_disconnected /
+        // relay_shutdown …)。这是重连策略唯一的事实来源,不能丢。
+        const closeEvent = event as CloseEvent | undefined;
         if (!settled) {
           settle(new Error("connection closed before ready"));
           fail("desktop_disconnected", "connection closed");
         } else {
-          phaseEmitter.fire({ phase: "closed" });
+          phaseEmitter.fire({
+            phase: "closed",
+            ...(typeof closeEvent?.code === "number" ? { closeCode: closeEvent.code } : {}),
+            ...(typeof closeEvent?.reason === "string" && closeEvent.reason.length > 0
+              ? { closeReason: closeEvent.reason }
+              : {}),
+          });
         }
       });
 
       sock.addEventListener("message", (event) => {
+        // 探活看门狗的唯一依据:收到任何帧即视为连接存活。
+        activityEmitter.fire(Date.now());
         if (typeof event.data === "string") {
           void handleControlFrame(event.data).catch((error: unknown) => {
             settle(error instanceof Error ? error : new Error(String(error)));
@@ -274,8 +295,12 @@ export function createConnectionTransport(params: {
   return {
     socket,
     onPhaseChange: (listener) => {
-      phaseEmitter.event(listener);
-      return () => undefined;
+      const disposable = phaseEmitter.event(listener);
+      return () => disposable.dispose();
+    },
+    onActivity: (listener) => {
+      const disposable = activityEmitter.event(listener);
+      return () => disposable.dispose();
     },
     connect,
     requestDeviceCredential(deviceName: string): Promise<IssuedDeviceCredential> {
@@ -304,6 +329,7 @@ export function createConnectionTransport(params: {
       disposed = true;
       ws?.close();
       phaseEmitter.dispose();
+      activityEmitter.dispose();
     },
   };
 }

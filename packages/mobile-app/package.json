@@ -8,7 +8,7 @@
     "start:tunnel": "expo start --tunnel",
     "ios": "expo run:ios",
     "lint": "oxlint App.tsx index.ts src",
-    "verify:conversation": "node scripts/verify-conversation-store.mjs"
+    "verify:conversation": "node scripts/verify.mjs all"
   },
   "dependencies": {
     "@zcode/client": "workspace:*",

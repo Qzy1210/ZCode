@@ -15,13 +15,18 @@ import type {
   ConversationRow,
   ConversationSnapshot,
   ConversationTopicFrame,
+  PendingInteraction,
+  PlanState,
+  SessionControl,
 } from "@zcode/shared/zcode-protocol-v4";
 import { applyConversationDeltas } from "@zcode/shared/zcode-protocol-v4";
+import { resolveStopAvailability } from "./interactionModel";
 import {
   createConversationTransport,
   type ConversationSubscription,
   type ConversationTransport,
   type ConversationWorkspaceTarget,
+  type InteractionAnswer,
 } from "./conversationTransport";
 const OLDER_PAGE_LIMIT = 60;
 const NOTIFY_COALESCE_MS = 100;
@@ -33,6 +38,14 @@ export interface ConversationSendState {
   message?: string;
 }
 
+/** 交互应答/中断的操作态:sending 期间禁用按钮,rejected 时把原因显示出来。 */
+export interface CommandActionState {
+  state: "idle" | "sending" | "rejected";
+  message?: string;
+  /** respond 专用:正在应答/刚被拒的交互 id。 */
+  interactionId?: string;
+}
+
 export interface ConversationView {
   status: ConversationStatus;
   rows: ConversationRow[];
@@ -42,6 +55,14 @@ export interface ConversationView {
   /** 存在流式行(正文/思考/工具进行中)时用于显示"生成中"指示。 */
   streaming: boolean;
   send: ConversationSendState;
+  /** 待回答的交互(审批/问答/计划批准);渲染与选择规则见 interactionModel。 */
+  pending: readonly PendingInteraction[];
+  /** 会话控制面:canStop/phase 等,用于中断按钮。 */
+  control: SessionControl | null;
+  /** 计划进度(TodoWrite 投影),只读展示。 */
+  plan: PlanState | null;
+  response: CommandActionState;
+  stop: CommandActionState;
   error?: { code: string; message: string };
 }
 
@@ -50,6 +71,10 @@ export interface ConversationStore {
   getSnapshot(): ConversationView;
   loadOlder(): Promise<void>;
   send(text: string): Promise<ConversationSendState>;
+  /** 回答审批/问答/计划批准;answer 由 interactionModel 构造。 */
+  respond(interactionId: string, answer: InteractionAnswer): Promise<CommandActionState>;
+  /** 中断当前 turn(桌面语义:保留队列,暂停自动排空)。 */
+  stopTurn(): Promise<CommandActionState>;
   /** 手动重试:按当前订阅强制回快照,用于错误态恢复。 */
   retry(): Promise<void>;
   dispose(): void;
@@ -62,6 +87,11 @@ const EMPTY_VIEW: ConversationView = {
   loadingOlder: false,
   streaming: false,
   send: { state: "idle" },
+  pending: [],
+  control: null,
+  plan: null,
+  response: { state: "idle" },
+  stop: { state: "idle" },
 };
 
 function isStreamingRow(row: ConversationRow): boolean {
@@ -73,6 +103,11 @@ function isStreamingRow(row: ConversationRow): boolean {
   }
   if (row.kind === "subagent") return row.status === "running";
   return false;
+}
+
+/** 命令被接受/幂等重复/无操作都算成功;stale/rejected/failed 才需要提示用户。 */
+function isCommandAccepted(ack: CommandAck): boolean {
+  return ack.status === "accepted" || ack.status === "duplicate" || ack.status === "noop";
 }
 
 function describeError(error: unknown): { code: string; message: string } {
@@ -104,6 +139,8 @@ export function createConversationStore(params: {
   let loadingOlder = false;
   let atTopReached = false;
   let send: ConversationSendState = { state: "idle" };
+  let response: CommandActionState = { state: "idle" };
+  let stop: CommandActionState = { state: "idle" };
   let view: ConversationView = EMPTY_VIEW;
 
   let resyncing = false;
@@ -119,6 +156,11 @@ export function createConversationStore(params: {
       loadingOlder,
       streaming: rows.some(isStreamingRow),
       send,
+      pending: snapshot?.pendingInteractions ?? [],
+      control: snapshot?.control ?? null,
+      plan: snapshot?.plan ?? null,
+      response,
+      stop,
       ...(error ? { error } : {}),
     };
   }
@@ -214,6 +256,13 @@ export function createConversationStore(params: {
       ...applyConversationDeltas(snapshot, frame.payload.deltas),
       seq: frame.toSeq,
     };
+    // 交互被服务端清场(已应答/取消)后,本地的 sending/rejected 提示不再有意义。
+    if (response.state !== "idle" && response.interactionId) {
+      const stillPending = snapshot.pendingInteractions.some(
+        (interaction) => interaction.interactionId === response.interactionId,
+      );
+      if (!stillPending) response = { state: "idle" };
+    }
     notifyCoalesced();
   }
 
@@ -290,7 +339,7 @@ export function createConversationStore(params: {
       try {
         const ack: CommandAck = await transport.sendText(sessionId, trimmed);
         if (disposed) return send;
-        if (ack.status === "accepted" || ack.status === "duplicate") {
+        if (isCommandAccepted(ack)) {
           send = { state: "idle" };
         } else {
           send = {
@@ -303,6 +352,48 @@ export function createConversationStore(params: {
       }
       notifyImmediate();
       return send;
+    },
+    async respond(interactionId, answer) {
+      if (disposed) return response;
+      response = { state: "sending", interactionId };
+      notifyImmediate();
+      try {
+        const ack = await transport.resolveInteraction(sessionId, interactionId, answer);
+        if (disposed) return response;
+        if (isCommandAccepted(ack)) {
+          response = { state: "idle" };
+        } else {
+          response = {
+            state: "rejected",
+            interactionId,
+            message: ack.message ?? ack.reasonCode ?? `应答被拒绝(${ack.status})`,
+          };
+        }
+      } catch (respondError) {
+        response = { state: "rejected", interactionId, message: describeError(respondError).message };
+      }
+      notifyImmediate();
+      return response;
+    },
+    async stopTurn() {
+      if (disposed) return stop;
+      stop = { state: "sending" };
+      notifyImmediate();
+      try {
+        const availability = resolveStopAvailability(snapshot?.control ?? null);
+        const ack = await transport.stop(
+          sessionId,
+          availability.foregroundExecutionId,
+        );
+        if (disposed) return stop;
+        stop = isCommandAccepted(ack)
+          ? { state: "idle" }
+          : { state: "rejected", message: ack.message ?? ack.reasonCode ?? `中断被拒绝(${ack.status})` };
+      } catch (stopError) {
+        stop = { state: "rejected", message: describeError(stopError).message };
+      }
+      notifyImmediate();
+      return stop;
     },
     async retry() {
       if (disposed) return;
