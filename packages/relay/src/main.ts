@@ -22,6 +22,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize, resolve } from "node:path";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
+import { gzipSync } from "node:zlib";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 
 const PORT = Number(process.env.RELAY_PORT || 8787);
@@ -71,10 +72,47 @@ const MIME_BY_EXT: Record<string, string> = {
   ".map": "application/json",
 };
 
+/** index.html 必须每次回源校验:资源名带内容哈希,新构建换新文件名。 */
+const INDEX_CACHE_CONTROL = "no-cache";
+/** Vite 产物文件名含内容哈希,可安全永久缓存——手机页每次刷新不再重下全部 JS。 */
+const HASHED_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
+
+/**
+ * 文本类资源按需 gzip:首屏初始加载约 8.7MB JS,不压缩在公网传输上代价过高。
+ * 压缩结果按路径缓存(产物文件名带哈希,内容不可变,可安全长期缓存);
+ * 上限放到 16MB:最大主包(5.6MB)必须覆盖;单文件首次压缩的同步开销一次性发生,之后走缓存。
+ */
+const COMPRESSIBLE_EXT = new Set([".js", ".mjs", ".css", ".json", ".svg", ".map"]);
+const GZIP_MAX_BYTES = 16 * 1024 * 1024;
+const GZIP_MAX_CACHE_ENTRIES = 256;
+const gzipCache = new Map<string, Buffer>();
+
+function maybeGzip(
+  request: import("node:http").IncomingMessage,
+  filePath: string,
+  content: Buffer,
+): { body: Buffer; encoding?: string } {
+  const ext = extname(filePath);
+  if (!COMPRESSIBLE_EXT.has(ext) || content.byteLength > GZIP_MAX_BYTES) {
+    return { body: content };
+  }
+  const acceptsGzip = /\bgzip\b/.test(request.headers["accept-encoding"] ?? "");
+  if (!acceptsGzip) return { body: content };
+  const cached = gzipCache.get(filePath);
+  if (cached) return { body: cached, encoding: "gzip" };
+  const compressed = gzipSync(content);
+  if (gzipCache.size >= GZIP_MAX_CACHE_ENTRIES) gzipCache.clear();
+  gzipCache.set(filePath, compressed);
+  return { body: compressed, encoding: "gzip" };
+}
+
 async function serveIndex(res: import("node:http").ServerResponse): Promise<void> {
   try {
     const index = await readFile(join(WEB_DIST, "index.html"));
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": INDEX_CACHE_CONTROL,
+    });
     res.end(index);
   } catch {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -87,7 +125,11 @@ async function serveIndex(res: import("node:http").ServerResponse): Promise<void
   }
 }
 
-async function serveStatic(res: import("node:http").ServerResponse, pathname: string): Promise<void> {
+async function serveStatic(
+  request: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+  pathname: string,
+): Promise<void> {
   const isAsset = pathname.startsWith("/assets/") || pathname.startsWith("/remote/assets/");
   if (!isAsset) {
     await serveIndex(res);
@@ -104,8 +146,14 @@ async function serveStatic(res: import("node:http").ServerResponse, pathname: st
   try {
     const content = await readFile(absolute);
     const mime = MIME_BY_EXT[extname(absolute)] ?? "application/octet-stream";
-    res.writeHead(200, { "Content-Type": mime, "Cache-Control": "no-store" });
-    res.end(content);
+    const compressed = maybeGzip(request, absolute, content);
+    res.writeHead(200, {
+      "Content-Type": mime,
+      "Cache-Control": HASHED_ASSET_CACHE_CONTROL,
+      Vary: "Accept-Encoding",
+      ...(compressed.encoding ? { "Content-Encoding": compressed.encoding } : {}),
+    });
+    res.end(compressed.body);
   } catch {
     await serveIndex(res);
   }
@@ -149,29 +197,72 @@ function handleHostSocket(ws: WebSocket): void {
   markAlive(ws);
   let entry: HostEntry | null = null;
 
+  /**
+   * 处理 host_register。必须支持**重复注册**:桌面「重新生成二维码」复用同一条 relay
+   * 连接换新 sid——此前只在首帧接受注册,导致新二维码扫进来查无注册(pair_unknown),
+   * 且旧 sid 残留成幽灵路由(线上故障根因,勿回退成一次性监听)。
+   */
+  function handleHostRegister(register: { token?: string; sid?: string }): void {
+    if (typeof register.sid !== "string" || register.sid.length === 0) return;
+    if (register.token !== HOST_TOKEN) {
+      ws.send(JSON.stringify({ type: "host_error", code: "invalid_token" }));
+      ws.close(4001, "invalid_token");
+      log("warn", "host_register rejected: invalid token");
+      return;
+    }
+    const sid = register.sid;
+    if (entry?.sid === sid) {
+      // 幂等:同一 sid 重复注册(网络重连后重发)只回执,不动已建立的手机连接。
+      ws.send(JSON.stringify({ type: "host_registered", sid }));
+      return;
+    }
+    if (entry) {
+      // 同一 socket 更换 sid:旧 sid 路由精确下线,旧手机按"重新生成"语义断开。
+      detachPhone(entry, "superseded");
+      if (hostsBySid.get(entry.sid) === entry) {
+        hostsBySid.delete(entry.sid);
+      }
+      entry = null;
+    }
+    // 同 sid 已有其他连接:顶替旧连接(桌面重连场景)。
+    const existing = hostsBySid.get(sid);
+    if (existing && existing.ws !== ws) {
+      detachPhone(existing, "superseded");
+      existing.ws.close(4000, "superseded");
+      hostsBySid.delete(sid);
+    }
+    entry = { ws, sid, phone: null };
+    hostsBySid.set(sid, entry);
+    ws.send(JSON.stringify({ type: "host_registered", sid }));
+    log("info", `host registered, sid=${sid.slice(0, 6)}…`);
+  }
+
   ws.on("message", (raw: RawData, isBinary: boolean) => {
-    if (!entry) return;
-    if (isBinary) {
-      // 数据面:原样转发给手机。
-      if (entry.phone?.readyState === WebSocket.OPEN) {
-        entry.phone.send(raw as Buffer);
+    if (!isBinary) {
+      const text = typeof raw === "string" ? raw : (raw as Buffer).toString("utf8");
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        parsed = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        parsed = null;
+      }
+      if (parsed?.type === "host_register") {
+        handleHostRegister(parsed as { token?: string; sid?: string });
+        return;
+      }
+      if (entry && parsed?.type === "phone_close") {
+        detachPhone(entry, "closed_by_host");
+        return;
+      }
+      if (entry && entry.phone?.readyState === WebSocket.OPEN) {
+        entry.phone.send(text);
       }
       return;
     }
-    const text = typeof raw === "string" ? raw : (raw as Buffer).toString("utf8");
-    // 控制面:只有 phone_close 是 relay 指令,其余原样转发给手机。
-    let parsed: Record<string, unknown> | null = null;
-    try {
-      parsed = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      parsed = null;
-    }
-    if (parsed?.type === "phone_close") {
-      detachPhone(entry, "closed_by_host");
-      return;
-    }
+    if (!entry) return;
+    // 数据面:原样转发给手机。
     if (entry.phone?.readyState === WebSocket.OPEN) {
-      entry.phone.send(text);
+      entry.phone.send(raw as Buffer);
     }
   });
 
@@ -183,39 +274,6 @@ function handleHostSocket(ws: WebSocket): void {
     }
     log("info", `host disconnected, sid=${entry.sid.slice(0, 6)}…`);
     entry = null;
-  });
-
-  ws.on("message", function onRegister(raw: RawData) {
-    if (entry) {
-      ws.off("message", onRegister);
-      return;
-    }
-    const text = typeof raw === "string" ? raw : (raw as Buffer).toString("utf8");
-    try {
-      const register = JSON.parse(text) as { type?: string; token?: string; sid?: string };
-      if (register?.type !== "host_register" || typeof register.sid !== "string") return;
-      ws.off("message", onRegister);
-      if (register.token !== HOST_TOKEN) {
-        ws.send(JSON.stringify({ type: "host_error", code: "invalid_token" }));
-        ws.close(4001, "invalid_token");
-        log("warn", "host_register rejected: invalid token");
-        return;
-      }
-      const sid = register.sid;
-      // 同 sid 重复注册(桌面重连):顶替旧连接。
-      const existing = hostsBySid.get(sid);
-      if (existing && existing.ws !== ws) {
-        detachPhone(existing, "superseded");
-        existing.ws.close(4000, "superseded");
-        hostsBySid.delete(sid);
-      }
-      entry = { ws, sid, phone: null };
-      hostsBySid.set(sid, entry);
-      ws.send(JSON.stringify({ type: "host_registered", sid }));
-      log("info", `host registered, sid=${sid.slice(0, 6)}…`);
-    } catch {
-      // 非 JSON 首帧:忽略,等待 register。
-    }
   });
 }
 
@@ -296,7 +354,7 @@ const requestListener: import("node:http").RequestListener = (req, res) => {
     res.end();
     return;
   }
-  void serveStatic(res, url.pathname).catch(() => {
+  void serveStatic(req, res, url.pathname).catch(() => {
     if (!res.headersSent) {
       res.writeHead(500);
       res.end();
