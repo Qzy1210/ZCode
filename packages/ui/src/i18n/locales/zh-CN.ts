@@ -1633,6 +1633,7 @@ const zhCN: Record<string, string> = {
   "webRemoteControl.qr.hint.relay": "经自托管中继连接,任意网络可用。二维码 10 分钟内有效,重新生成后旧码作废;关闭本弹窗不影响手机连接。",
   "webRemoteControl.qr.regenerate": "重新生成",
   "webRemoteControl.qr.stop": "停止远控",
+  "webRemoteControl.qr.expiredHint": "二维码已过期，请重新生成后再扫码。",
   "webRemoteControl.qr.stoppedHint": "远控已停止,手机将无法连接。重新生成二维码可再次开启。",
   "webRemoteControl.qr.retry": "重试",
   "mobileRemote.title": "ZCode 远程控制",

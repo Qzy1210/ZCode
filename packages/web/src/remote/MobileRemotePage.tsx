@@ -34,6 +34,24 @@ const PHASE_COPY: Record<string, string> = {
   closed: "连接已断开",
 };
 
+/**
+ * 按错误码给出可操作的下一步:认证类错误(链接失效/过期)与网络类错误的处置完全不同,
+ * 统一提示"请确认网络"会把用户引向错误方向。
+ */
+const ERROR_ACTION_HINTS: Record<string, string> = {
+  pair_expired: "配对链接已过期，请在桌面端重新生成二维码后重新扫码。",
+  pair_unknown: "配对链接已失效（桌面端可能已重启或重新生成过二维码），请重新扫码。",
+  auth_failed: "配对校验失败，请关闭本页重新扫码。",
+  auth_expired: "认证超时，请重新扫码。",
+  rate_limited: "认证尝试次数过多，请在桌面端重新生成二维码后重新扫码。",
+  desktop_disconnected: "与桌面端的连接已断开，请确认桌面端仍在运行后重试。",
+  relay_unavailable: "无法连接中继服务，请检查网络后重试。",
+  connection_timeout: "连接超时，请确认手机与桌面端网络可达后重试。",
+  workspace_unavailable: "桌面端工作区暂不可用，请确认桌面窗口仍在运行后重试。",
+  bridge_failed: "同步工作区失败，请重新扫码重试。",
+};
+const DEFAULT_ERROR_HINT = "请确认手机与电脑网络可达，并在桌面端重新生成二维码。";
+
 export function MobileRemotePage() {
   const [state, setState] = useState<PageState>({ kind: "connecting" });
   const [openTask, setOpenTask] = useState<MobileOpenTaskTarget | null>(null);
@@ -91,7 +109,7 @@ export function MobileRemotePage() {
               {state.message ?? state.code}
             </p>
             <p className="mt-1 text-ui-xs/relaxed text-foreground-subtle">
-              请确认手机与电脑网络可达，并在桌面端重新生成二维码。
+              {ERROR_ACTION_HINTS[state.code] ?? DEFAULT_ERROR_HINT}
             </p>
             <button
               type="button"

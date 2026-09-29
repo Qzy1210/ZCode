@@ -4,7 +4,6 @@ import {
   MOBILE_PAIRING_MAX_AUTH_FAILURES,
   MOBILE_PAIRING_NONCE_TTL_MS,
   MOBILE_PAIRING_TTL_MS,
-  isMobilePairingQrFresh,
   mobilePairingBase64Url,
   type MobilePairingErrorCode,
 } from "@zcode/shared";
@@ -65,12 +64,18 @@ export interface MobilePairingManager {
   }): { sid: string; hash: string; t: number; mid: string; name: string; appVersion: string };
   /** 手机 auth_init:校验 sid 与时间窗,发一次性 nonce。 */
   beginAuth(sid: string): MobilePairingBeginAuthResult;
-  /** 手机 auth_response:校验 proof。成功即 paired。 */
+  /** 手机 auth_response:校验 proof。成功即 paired,并滑动续期。 */
   verifyAuth(input: {
     sid: string;
     proof: string;
     clientTs: number;
   }): MobilePairingVerifyResult;
+  /**
+   * 滑动续期:把会话有效期推到 now+TTL。
+   * 由已配对会话在桥接存活期间周期性调用——手机页面被系统回收后重新加载时,
+   * 只要它此前保持在线,就还能用同一链接重新认证,不必回到桌面重新扫码。
+   */
+  touch(sid: string): void;
   /** 会话是否已 paired(桥接前置条件)。 */
   isPaired(sid: string): boolean;
   /** 注销会话(手动关闭二维码、失败超限、桌面退出)。 */
@@ -133,10 +138,11 @@ export function createMobilePairingManager(
     },
     beginAuth(sid) {
       const observedAt = now();
-      pruneExpired(observedAt);
       const session = sessions.get(sid);
       if (!session) return { ok: false, code: "pair_unknown" };
-      if (!isMobilePairingQrFresh(session.issuedAtMs, observedAt)) {
+      // 先判过期再谈其他:过期会话此前会被 prune 掉、误报 pair_unknown,
+      // 手机端因此拿不到"链接已过期"的可操作提示。
+      if (session.expiresAtMs <= observedAt) {
         revoke(sid);
         return { ok: false, code: "pair_expired" };
       }
@@ -151,10 +157,9 @@ export function createMobilePairingManager(
     },
     verifyAuth({ sid, proof, clientTs }) {
       const observedAt = now();
-      pruneExpired(observedAt);
       const session = sessions.get(sid);
       if (!session) return { ok: false, code: "pair_unknown" };
-      if (!isMobilePairingQrFresh(session.issuedAtMs, observedAt)) {
+      if (session.expiresAtMs <= observedAt) {
         revoke(sid);
         return { ok: false, code: "pair_expired" };
       }
@@ -183,7 +188,16 @@ export function createMobilePairingManager(
         return { ok: false, code: "auth_failed" };
       }
       session.status = "paired";
+      // 认证成功即续期:手机页面刷新(reload)会重走一次完整认证,
+      // 只要在上次活动 +TTL 内,就能用同一链接恢复,无需重新扫码。
+      session.expiresAtMs = observedAt + ttlMs;
       return { ok: true, status: "paired" };
+    },
+    touch(sid) {
+      const observedAt = now();
+      const session = sessions.get(sid);
+      if (!session || session.expiresAtMs <= observedAt) return;
+      session.expiresAtMs = observedAt + ttlMs;
     },
     isPaired(sid) {
       const observedAt = now();

@@ -1753,6 +1753,7 @@ const enUS: Record<string, string> = {
   "webRemoteControl.qr.hint.relay": "Connected via your self-hosted relay - works from any network. QR valid for 10 minutes; regenerating invalidates the old one; closing this dialog does not disconnect your phone.",
   "webRemoteControl.qr.regenerate": "Regenerate",
   "webRemoteControl.qr.stop": "Stop remote control",
+  "webRemoteControl.qr.expiredHint": "QR code expired. Regenerate it before scanning.",
   "webRemoteControl.qr.stoppedHint": "Remote control stopped; phones can no longer connect. Regenerate the QR code to start again.",
   "webRemoteControl.qr.retry": "Retry",
   "mobileRemote.title": "ZCode Remote",

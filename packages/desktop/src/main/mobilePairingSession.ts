@@ -56,6 +56,9 @@ export interface MobilePairingSession {
   handleTransportClosed(): void;
 }
 
+/** 桥接存活期间续期配对会话的间隔(远小于 10 分钟 TTL,留足余量)。 */
+const BRIDGE_TOUCH_INTERVAL_MS = 3 * 60 * 1000;
+
 export function createMobilePairingSession(
   transport: MobilePairingSessionTransport,
   options: CreateMobilePairingSessionOptions,
@@ -66,6 +69,7 @@ export function createMobilePairingSession(
   let hostPort: MessagePortMain | null = null;
   let hostProcess: ElectronUtilityProcess | null = null;
   let attachmentId: string | null = null;
+  let bridgeTouchTimer: ReturnType<typeof setInterval> | null = null;
 
   function sendFrame(frame: MobilePairingServerFrame): void {
     transport.sendControlFrame(JSON.stringify(frame));
@@ -101,6 +105,10 @@ export function createMobilePairingSession(
   }
 
   function teardownBridge(): void {
+    if (bridgeTouchTimer !== null) {
+      clearInterval(bridgeTouchTimer);
+      bridgeTouchTimer = null;
+    }
     if (hostPort) {
       try {
         hostPort.close();
@@ -163,6 +171,9 @@ export function createMobilePairingSession(
       }
     });
     port1.start();
+    // 桥接存活期间周期续期配对会话:手机页面被系统回收后重载时,
+    // 只要它此前保持在线,就还能用同一链接重新认证,不必回到桌面重新扫码。
+    bridgeTouchTimer = setInterval(() => pairingManager.touch(sid), BRIDGE_TOUCH_INTERVAL_MS);
 
     sendFrame(
       mobilePairingBridgeReadyFrameSchema.parse({ type: "bridge_ready", workspaceKey }),

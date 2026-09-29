@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import QRCode from "qrcode";
-import type { BotProvider } from "@zcode/shared";
+import { MOBILE_PAIRING_TTL_MS, type BotProvider } from "@zcode/shared";
 import { Bot as BotIcon, MonitorSmartphone, Power, QrCode, RefreshCw, XIcon } from "lucide-react";
 import { BotsDialog } from "@/BotsDialog.js";
 import { ProviderIcon } from "@/BotsDialog/shared.js";
@@ -52,6 +52,8 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
   const [qrLoading, setQrLoading] = useState(false);
   const [qrMode, setQrMode] = useState<"lan" | "relay" | null>(null);
   const [qrStopped, setQrStopped] = useState(false);
+  const [qrIssuedAt, setQrIssuedAt] = useState<number | null>(null);
+  const [qrExpired, setQrExpired] = useState(false);
 
   const generateQr = useCallback(
     async (regenerate: boolean) => {
@@ -71,6 +73,10 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
           return;
         }
         setQrMode(result.mode);
+        // 记录签发时间:二维码在 TTL 后失效,弹层据此提示"已过期",避免扫到过期码。
+        const issuedAt = Number(new URL(result.url).searchParams.get("t"));
+        setQrIssuedAt(Number.isFinite(issuedAt) && issuedAt > 0 ? issuedAt : Date.now());
+        setQrExpired(false);
         const dataUrl = await QRCode.toDataURL(result.url, { margin: 1, width: 220 });
         setQrImageUrl(dataUrl);
         setQrStopped(false);
@@ -95,6 +101,7 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
     try {
       await platform.mobilePairingStop();
       setQrStopped(true);
+      setQrExpired(false);
       setQrImageUrl(null);
       setQrMode(null);
       logger.info("[WebRemoteControlDialog] 移动端远控已停止");
@@ -111,6 +118,18 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
     if (!open) return;
     void generateQr(false);
   }, [open, generateQr]);
+
+  useEffect(() => {
+    // 当前二维码到期即切换到"已过期"态,防止屏幕上残留的二维码被扫后认证失败。
+    if (qrImageUrl === null || qrIssuedAt === null) return;
+    const remaining = qrIssuedAt + MOBILE_PAIRING_TTL_MS - Date.now();
+    if (remaining <= 0) {
+      setQrExpired(true);
+      return;
+    }
+    const timer = setTimeout(() => setQrExpired(true), remaining);
+    return () => clearTimeout(timer);
+  }, [qrImageUrl, qrIssuedAt]);
 
   const handleOpenBotEntry = (provider: RemoteControlBotProvider) => {
     setBotEntryProvider(provider);
@@ -185,12 +204,27 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
                 <div className="flex min-h-[260px] flex-1 items-center justify-center rounded-lg bg-surface p-4">
                   {qrLoading ? (
                     <div className="size-8 animate-spin rounded-full border-2 border-border border-t-primary" />
-                  ) : qrImageUrl ? (
+                  ) : qrImageUrl && !qrExpired ? (
                     <img
                       src={qrImageUrl}
                       alt="mobile pairing qr"
                       className="size-[220px] rounded-lg bg-white p-1"
                     />
+                  ) : qrImageUrl && qrExpired ? (
+                    <div className="max-w-xs space-y-2 text-center">
+                      <p className="text-ui-sm text-foreground-subtle">
+                        {intl.formatMessage({ id: "webRemoteControl.qr.expiredHint" })}
+                      </p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void generateQr(true)}
+                      >
+                        <RefreshCw className="size-3.5" />
+                        {intl.formatMessage({ id: "webRemoteControl.qr.regenerate" })}
+                      </Button>
+                    </div>
                   ) : qrStopped ? (
                     <div className="max-w-xs space-y-2 text-center">
                       <p className="text-ui-sm text-foreground-subtle">
@@ -221,7 +255,7 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
                     </div>
                   )}
                 </div>
-                {qrImageUrl ? (
+                {qrImageUrl && !qrExpired ? (
                   <div className="mt-3 flex items-center justify-between gap-2">
                     <p className="min-w-0 text-ui-xs text-foreground-subtle">
                       {intl.formatMessage({
