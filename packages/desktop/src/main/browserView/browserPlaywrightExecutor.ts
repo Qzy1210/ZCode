@@ -1,4 +1,8 @@
 /* eslint-disable max-lines, @typescript-eslint/no-explicit-any -- 该函数会序列化后在隔离的浏览器页面上下文执行，不能引用 host 闭包。 */
+// 本文件里的 *_runtime 函数不是跑在 main 进程:它们被 fn.toString() 序列化后注入页面执行,
+// 所以 document/Element/CSS 等 DOM 全局在这里是合法的。main 工程默认 lib 不含 DOM,
+// 用文件级 lib 引用声明这段真实执行环境,而不是给整个 main 工程打开 DOM 类型。
+/// <reference lib="dom" />
 import type { BrowserCommandResult, BrowserPlaywrightAction } from "@zcode/shared";
 import { buildViewportScreenshotParams } from "./browserCommandPageHandlers.js";
 import type { ControlledView } from "./browserCommandTypes.js";
