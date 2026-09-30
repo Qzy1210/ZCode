@@ -803,6 +803,9 @@ importers:
 
   packages/mobile-app:
     dependencies:
+      '@expo/vector-icons':
+        specifier: ^15.1.1
+        version: 15.1.1(expo-font@57.0.4(expo@57.0.25)(react-native@0.86.3(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.7))(react@19.2.7))(react-native@0.86.3(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.7))(react@19.2.7)
       '@zcode/client':
         specifier: workspace:*
         version: link:../client
@@ -824,6 +827,9 @@ importers:
       expo-secure-store:
         specifier: ~57.0.4
         version: 57.0.4(expo@57.0.25)
+      expo-splash-screen:
+        specifier: ^57.0.9
+        version: 57.0.9(expo@57.0.25)(typescript@6.0.2)
       expo-status-bar:
         specifier: ~57.0.1
         version: 57.0.1(expo@57.0.25)(react-native@0.86.3(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.7))(react@19.2.7)
@@ -2565,6 +2571,13 @@ packages:
 
   '@expo/sudo-prompt@9.3.2':
     resolution: {integrity: sha512-HHQigo3rQWKMDzYDLkubN5WQOYXJJE2eNqIQC2axC2iO3mHdwnIR7FgZVvHWtBwAdzBgAP0ECp8KqS8TiMKvgw==}
+
+  '@expo/vector-icons@15.1.1':
+    resolution: {integrity: sha512-Iu2VkcoI5vygbtYngm7jb4ifxElNVXQYdDrYkT7UCEIiKLeWnQY0wf2ZhHZ+Wro6Sc5TaumpKUOqDRpLi5rkvw==}
+    peerDependencies:
+      expo-font: '>=14.0.4'
+      react: 19.2.7
+      react-native: '*'
 
   '@expo/ws-tunnel@2.0.0':
     resolution: {integrity: sha512-j+JfTRdCk820J9dU0sA2SqshQIKFOMo7ED84w9MJFcebfbNQgsLztEY/SABDkGnjatrW4xGqnUhVRxSBVyCkXw==}
@@ -7359,6 +7372,11 @@ packages:
   expo-server@57.0.3:
     resolution: {integrity: sha512-aK+LdKzauHSGmsOStZtyxdzv0zWssCkxTw3m4QuOhfDSJsZaMRTd9O41d8ixU/QfELTbaJ0oRNcF7JFV/7O9YQ==}
     engines: {node: '>=20.16.0'}
+
+  expo-splash-screen@57.0.9:
+    resolution: {integrity: sha512-7cKDn7uBwg0RkcmY015/5j9st4msWJ4zQiPmQdVZoppW3cFSbv05n7xhM6CjUU466Tx4VRTqDF21HuIHkmnEtA==}
+    peerDependencies:
+      expo: '*'
 
   expo-status-bar@57.0.1:
     resolution: {integrity: sha512-Xwaq1gAoVRWx5dPG5VhT5RSbnI9OilhZnO5qoPBnUaBAa5VzRzfdS8q0/bsPt0jR2DKLtGuP0bQ6efMJ4RIMDg==}
@@ -12801,6 +12819,12 @@ snapshots:
 
   '@expo/sudo-prompt@9.3.2': {}
 
+  '@expo/vector-icons@15.1.1(expo-font@57.0.4(expo@57.0.25)(react-native@0.86.3(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.7))(react@19.2.7))(react-native@0.86.3(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.7))(react@19.2.7)':
+    dependencies:
+      expo-font: 57.0.4(expo@57.0.25)(react-native@0.86.3(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.7))(react@19.2.7)
+      react: 19.2.7
+      react-native: 0.86.3(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.7)
+
   '@expo/ws-tunnel@2.0.0(ws@8.20.0)':
     dependencies:
       ws: 8.20.0
@@ -17710,6 +17734,16 @@ snapshots:
       expo: 57.0.25(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-dom@19.2.7(react@19.2.7))(react-native@0.86.3(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.7))(react@19.2.7)(typescript@6.0.2)
 
   expo-server@57.0.3: {}
+
+  expo-splash-screen@57.0.9(expo@57.0.25)(typescript@6.0.2):
+    dependencies:
+      '@expo/config-plugins': 57.0.9(typescript@6.0.2)
+      '@expo/image-utils': 0.11.5(typescript@6.0.2)
+      expo: 57.0.25(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-dom@19.2.7(react@19.2.7))(react-native@0.86.3(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.7))(react@19.2.7)(typescript@6.0.2)
+      xml2js: 0.6.0
+    transitivePeerDependencies:
+      - supports-color
+      - typescript
 
   expo-status-bar@57.0.1(expo@57.0.25)(react-native@0.86.3(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.7))(react@19.2.7):
     dependencies:

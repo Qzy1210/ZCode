@@ -5,12 +5,13 @@
  * - 连接代际(generation)作为屏幕 key:重连成功后屏幕重建,订阅与快照自动刷新;
  * - 断线重连期间保留最后画面,顶部显示横条并禁用写入类操作。
  */
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { AppState as RNAppState, Pressable, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { AppState as RNAppState, BackHandler, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 
 import { createConnectionRuntime } from "./src/connectionRuntime";
+import { createSessionTask } from "./src/conversation/createSession";
 import type { PairingQrPayload } from "./src/pairingQr";
 import { PairScreen } from "./src/screens/PairScreen";
 import { SessionScreen } from "./src/screens/SessionScreen";
@@ -58,6 +59,11 @@ export default function App() {
    * 用栈而不是单个会话,是因为子代理下钻要能逐层返回,且共用同一条连接。
    */
   const [sessionStack, setSessionStack] = useState<OpenTaskTarget[]>([]);
+  /** 栈长镜像:供硬件返回键同步判断(见下)。 */
+  const sessionStackRef = useRef<OpenTaskTarget[]>([]);
+  sessionStackRef.current = sessionStack;
+  /** 新建任务失败原因(显示在列表屏顶部)。 */
+  const [createTaskError, setCreateTaskError] = useState<string | null>(null);
   const openTask = sessionStack[sessionStack.length - 1] ?? null;
 
   useEffect(() => {
@@ -66,9 +72,49 @@ export default function App() {
     if (state.kind !== "ready") setSessionStack([]);
   }, [state.kind]);
 
+  useEffect(() => {
+    // Android 硬件返回键:有会话就逐层返回,否则交给系统(退出 App)。
+    // 不接管的话按返回会直接退出,与安卓用户预期不符。
+    // 注意:这里必须**同步**返回布尔(决定是否消费事件),所以用 ref 读栈长——
+    // 在 setState 更新器里赋值再返回是拿不到新值的(更新器异步执行),
+    // 那会让 handler 返回 false、应用直接退出。
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (sessionStackRef.current.length === 0) return false;
+      setSessionStack((stack) => stack.slice(0, -1));
+      return true;
+    });
+    return () => subscription.remove();
+  }, []);
+
   const handlePaired = (qr: PairingQrPayload) => {
     void runtime.connectWithQr(qr);
   };
+
+  /** 新建任务:发 createSession(草稿会话)后直接进入会话屏;失败时提示在列表上。 */
+  const handleCreateTask = useCallback(
+    async (workspace: { workspacePath: string; workspaceIdentity?: string }) => {
+      if (state.kind !== "ready") return;
+      setCreateTaskError(null);
+      const result = await createSessionTask({
+        services: state.services,
+        clientId: state.clientId,
+        workspace,
+      });
+      if (!result.ok) {
+        setCreateTaskError(result.message);
+        return;
+      }
+      setSessionStack([
+        {
+          taskId: result.sessionId,
+          title: "新任务",
+          workspacePath: workspace.workspacePath,
+          ...(workspace.workspaceIdentity ? { workspaceIdentity: workspace.workspaceIdentity } : {}),
+        },
+      ]);
+    },
+    [state],
+  );
 
   return (
     <SafeAreaProvider>
@@ -130,44 +176,65 @@ export default function App() {
                 </Pressable>
               </View>
             ) : null}
+            {/*
+              任务列表常驻:会话作为上层覆盖而不是替换列表。
+              以前进入会话会卸载列表、返回时重新订阅——若此刻连接已断但尚未被判定,
+              重订阅会永久 pending(卡在"正在同步项目与任务…")或直接失败,表现为
+              "返回列表后无法重连"。桌面/Web 的列表(侧栏)同样是常驻的。
+            */}
+            {/*
+              会话打开时把常驻列表从无障碍树里摘掉:否则读屏(以及 uiautomator 这类
+              自动化)会聚焦到被覆盖层挡住的控件,点上去无效——设备验收脚本就踩过。
+            */}
+            <View
+              style={styles.stack}
+              importantForAccessibility={openTask ? "no-hide-descendants" : "auto"}
+              accessibilityElementsHidden={openTask !== null}
+              pointerEvents={openTask ? "none" : "auto"}
+            >
+            <TaskListScreen
+              key={`tasks#${state.generation}`}
+              services={state.services}
+              connectionMode={state.mode}
+              reconnecting={state.banner !== null}
+              onOpenTask={(target) => setSessionStack([target])}
+              onCreateTask={(workspace) => void handleCreateTask(workspace)}
+              createTaskError={createTaskError}
+              onDisconnect={() => runtime.disconnect()}
+              onForgetDevice={() => void runtime.forgetDevice()}
+            />
+            </View>
             {openTask ? (
-              <SessionScreen
-                // 连接代际入 key:重连成功后重建 store 与订阅,内容自动跟上。
-                key={`${openTask.taskId}#${state.generation}`}
-                services={state.services}
-                workspacePath={openTask.workspacePath}
-                {...(openTask.workspaceIdentity
-                  ? { workspaceIdentity: openTask.workspaceIdentity }
-                  : {})}
-                sessionId={openTask.taskId}
-                title={openTask.title}
-                reconnecting={state.banner !== null}
-                onBack={() => setSessionStack((stack) => stack.slice(0, -1))}
-                onOpenSession={({ sessionId, title }) =>
-                  setSessionStack((stack) => [
-                    ...stack,
-                    {
-                      taskId: sessionId,
-                      title,
-                      workspacePath: openTask.workspacePath,
-                      ...(openTask.workspaceIdentity
-                        ? { workspaceIdentity: openTask.workspaceIdentity }
-                        : {}),
-                    },
-                  ])
-                }
-              />
-            ) : (
-              <TaskListScreen
-                key={`tasks#${state.generation}`}
-                services={state.services}
-                connectionMode={state.mode}
-                reconnecting={state.banner !== null}
-                onOpenTask={(target) => setSessionStack([target])}
-                onDisconnect={() => runtime.disconnect()}
-                onForgetDevice={() => void runtime.forgetDevice()}
-              />
-            )}
+              <View style={styles.overlay}>
+                <SessionScreen
+                  // 连接代际入 key:重连成功后重建 store 与订阅,内容自动跟上。
+                  key={`${openTask.taskId}#${state.generation}`}
+                  services={state.services}
+                  clientId={state.clientId}
+                  workspacePath={openTask.workspacePath}
+                  {...(openTask.workspaceIdentity
+                    ? { workspaceIdentity: openTask.workspaceIdentity }
+                    : {})}
+                  sessionId={openTask.taskId}
+                  title={openTask.title}
+                  reconnecting={state.banner !== null}
+                  onBack={() => setSessionStack((stack) => stack.slice(0, -1))}
+                  onOpenSession={({ sessionId, title }) =>
+                    setSessionStack((stack) => [
+                      ...stack,
+                      {
+                        taskId: sessionId,
+                        title,
+                        workspacePath: openTask.workspacePath,
+                        ...(openTask.workspaceIdentity
+                          ? { workspaceIdentity: openTask.workspaceIdentity }
+                          : {}),
+                      },
+                    ])
+                  }
+                />
+              </View>
+            ) : null}
           </>
         ) : null}
       </SafeAreaView>
@@ -177,6 +244,16 @@ export default function App() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.background },
+  stack: { flex: 1 },
+  /** 会话覆盖在常驻列表之上(保留列表布局与订阅)。 */
+  overlay: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: theme.background,
+  },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24, gap: 10 },
   phaseText: { color: theme.foreground, fontSize: 15 },
   detailText: { color: theme.foregroundSubtle, fontSize: 13 },

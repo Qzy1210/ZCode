@@ -1,24 +1,24 @@
-/* 会话屏:历史消息 + 实时流式 + 发送输入。
+/* 会话屏:按"轮"组织的消息流 + 底部交互卡片与输入。
  *
- * 设计取舍(与桌面 UI 的差异):
- * - 只渲染"手机上读得下去"的行:用户输入、助手正文、思考摘要、工具卡片、子代理、轮分隔;
- *   计划/审批/文件改动等富交互留给 P3,不在这里做半成品;
- * - 未接 markdown 渲染器,正文按纯文本展示(保留换行),避免为一种格式引入整棵依赖;
- * - 数据全部来自 conversationStore(单一所有者),本组件不解析帧。
+ * 展示规则(与桌面端一致,判定在 conversation/turnRenderModel.ts):
+ * - 用户输入与最终助手正文常显;
+ * - 一轮里的思考/工具/子代理等"过程"折叠成一行「已工作 N 秒 / 已处理 / 已停止」,点开查看;
+ * - 进行中的轮默认展开,中断/失败强制展开,没有最终正文时不折叠。
+ *
+ * 数据全部来自 conversationStore(单一所有者),本组件不解析帧;
+ * 单行渲染在 SessionRowView,协议语义在 interactionModel / turnRenderModel。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   FlatList,
   KeyboardAvoidingView,
-  Platform,
   Pressable,
   Text,
-  TextInput,
   View,
   type NativeScrollEvent,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { RemoteServiceAccess } from "@zcode/client";
-import type { ConversationRow } from "@zcode/shared/zcode-protocol-v4";
 
 import { createConversationStore, type ConversationView } from "../conversation/conversationStore";
 import {
@@ -26,56 +26,30 @@ import {
   selectInteractionForDisplay,
   summarizePlan,
 } from "../conversation/interactionModel";
-import { InteractionCard } from "./InteractionCard";
+import {
+  buildTurnRenderModel,
+  describeFileChanges,
+  type TurnRenderItem,
+} from "../conversation/turnRenderModel";
+import {
+  buildSendOptions,
+  describeDraftSummary,
+  flattenModelOptions,
+  resolveBaseModel,
+  resolveComposerPlaceholder,
+  type DraftConfig,
+  type ModelOption,
+} from "../conversation/draftConfig";
 import type { ConversationWorkspaceTarget } from "../conversation/conversationTransport";
-import { formatRelativeTime, theme } from "../theme";
+import { formatRelativeTime } from "../theme";
+import { ConfigPickerSheet, type ConfigPickerTarget } from "./ConfigPickerSheet";
+import { InteractionCard } from "./InteractionCard";
+import { SessionComposer } from "./SessionComposer";
+import { SessionStatusBar } from "./SessionStatusBar";
+import { SessionRowView } from "./SessionRowView";
 import { sessionStyles as styles } from "./sessionStyles";
 
-const TOOL_STATUS_LABEL: Record<string, string> = {
-  inputStreaming: "准备中",
-  pendingApproval: "待确认",
-  running: "运行中",
-  success: "完成",
-  error: "失败",
-  cancelled: "已取消",
-};
-
-const SUBAGENT_STATUS_LABEL: Record<string, string> = {
-  running: "进行中",
-  success: "完成",
-  failed: "失败",
-  cancelled: "已取消",
-};
-
-const TOOL_STATUS_COLOR: Record<string, string> = {
-  inputStreaming: theme.foregroundSubtle,
-  pendingApproval: theme.warning,
-  running: theme.info,
-  success: theme.success,
-  error: theme.destructive,
-  cancelled: theme.foregroundSubtle,
-};
-
-const OUTPUT_PREVIEW_LINES = 4;
-const OUTPUT_PREVIEW_CHARS = 400;
-
-function truncateLines(text: string, maxLines: number, maxChars: number): string {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return "";
-  const lines = trimmed.split("\n");
-  const clipped =
-    lines.length > maxLines ? `${lines.slice(0, maxLines).join("\n")} …` : trimmed;
-  return clipped.length > maxChars ? `${clipped.slice(0, maxChars)} …` : clipped;
-}
-
-function toolDetail(row: Extract<ConversationRow, { kind: "toolCall" }>): string {
-  if (row.error) return `${row.error.code}: ${row.error.message}`;
-  const output = row.output?.text ?? row.outputPreview?.text ?? "";
-  const fromOutput = truncateLines(output, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_CHARS);
-  if (fromOutput) return fromOutput;
-  // 参数只在没有输出时展示:replayable 档下 input 是半截流,长参数会刷屏。
-  return truncateLines(row.inputText, 2, 160);
-}
+const DURATION_TICK_MS = 1_000;
 
 export function SessionScreen({
   services,
@@ -86,12 +60,15 @@ export function SessionScreen({
   onBack,
   onOpenSession,
   reconnecting = false,
+  clientId,
 }: {
   services: RemoteServiceAccess;
   workspacePath: string;
   workspaceIdentity?: string;
   sessionId: string;
   title: string;
+  /** 连接级 clientId(命令信封与握手共用)。 */
+  clientId: string;
   /** 连接断开重连中:保留画面但禁用写入,避免在死连接上发命令永久挂起。 */
   reconnecting?: boolean;
   onBack: () => void;
@@ -107,8 +84,8 @@ export function SessionScreen({
     [workspacePath, workspaceIdentity],
   );
   const store = useMemo(
-    () => createConversationStore({ services, target, sessionId }),
-    [services, target, sessionId],
+    () => createConversationStore({ services, target, sessionId, clientId }),
+    [services, target, sessionId, clientId],
   );
   useEffect(() => () => store.dispose(), [store]);
   const view: ConversationView = useSyncExternalStore(
@@ -117,10 +94,72 @@ export function SessionScreen({
     store.getSnapshot,
   );
 
-  const listRef = useRef<FlatList<ConversationRow>>(null);
+  const listRef = useRef<FlatList<TurnRenderItem>>(null);
+  /** 尾部行 id:用于区分"新消息"与"前插历史",只在有新消息时跟随到底部。 */
+  const lastTailRowId = useRef<number>(-1);
   /** 用户是否停留在底部:决定流式增长时是否继续跟随。 */
   const stickToBottom = useRef(true);
   const [draft, setDraft] = useState("");
+  /** 每个轮的过程块是否被手动展开;未记录时用模型给的默认值。 */
+  const [expandedTurns, setExpandedTurns] = useState<Record<string, boolean>>({});
+  /** 每秒 tick:驱动"工作中 N 秒"(仅在有流式内容时运行)。 */
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  /** 草稿级模型/模式/思考级别选择:随下一次发送提交,不改会话级配置(与桌面一致)。 */
+  const [draftConfig, setDraftConfig] = useState<DraftConfig>({});
+  const [pickerTarget, setPickerTarget] = useState<ConfigPickerTarget | null>(null);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  /** 工具条一次性提示(目前只有"添加上下文"在移动端不可用)。 */
+  const [composerHint, setComposerHint] = useState<string | null>(null);
+  /**
+   * Android 上会话覆盖层从屏幕顶端开始画(edge-to-edge),状态栏/导航条让出的
+   * 安全区由本屏自己处理;iOS 由外层 SafeAreaView 兜底,insets 只在键盘避让与
+   * 底部留白时使用。
+   */
+  const insets = useSafeAreaInsets();
+
+  useEffect(() => {
+    if (!view.streaming) return;
+    const timer = setInterval(() => setNowMs(Date.now()), DURATION_TICK_MS);
+    return () => clearInterval(timer);
+  }, [view.streaming]);
+
+  const draftSummary = useMemo(
+    () => describeDraftSummary(view.config, draftConfig),
+    [view.config, draftConfig],
+  );
+
+  /**
+   * 占位文案与桌面 composer 同语义(chat.placeholder.*):判定在 draftConfig 纯函数里。
+   */
+  const composerPlaceholder = useMemo(
+    () =>
+      resolveComposerPlaceholder({
+        hasHistory: view.rows.length > 0,
+        streaming: view.streaming,
+      }),
+    [view.rows.length, view.streaming],
+  );
+
+  // 打开模型选择时才拉取列表(local scope 的本机 Registry,无需 workspace 参数)。
+  useEffect(() => {
+    if (pickerTarget !== "model" || modelOptions.length > 0 || loadingModels) return;
+    setLoadingModels(true);
+    void services.modelSelectionService
+      .getView({ selection: null })
+      .then((view) => setModelOptions(flattenModelOptions(view)))
+      .catch(() => setModelOptions([]))
+      .finally(() => setLoadingModels(false));
+  }, [pickerTarget, modelOptions.length, loadingModels, services]);
+
+  const items = useMemo(
+    () =>
+      buildTurnRenderModel(view.rows, {
+        nowMs,
+        ...(view.control?.phase ? { sessionPhase: view.control.phase } : {}),
+      }),
+    [view.rows, view.control?.phase, nowMs],
+  );
 
   const handleScroll = useCallback((event: { nativeEvent: NativeScrollEvent }) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -133,6 +172,12 @@ export function SessionScreen({
     listRef.current?.scrollToEnd({ animated: false });
   }, []);
 
+  /** 滚到顶部附近自动加载更早的历史;到顶后不再请求。 */
+  const handleStartReached = useCallback(() => {
+    if (view.atTop || view.loadingOlder || view.status !== "ready") return;
+    void store.loadOlder();
+  }, [store, view.atTop, view.loadingOlder, view.status]);
+
   // 交互/控制面派生:协议判断都在纯函数里,这里只做 memo。
   const interactionCard = useMemo(
     () => selectInteractionForDisplay(view.pending),
@@ -144,145 +189,57 @@ export function SessionScreen({
   const handleSend = useCallback(async () => {
     const text = draft.trim();
     if (text.length === 0 || view.send.state === "sending") return;
-    const result = await store.send(text);
-    if (result.state === "idle") setDraft("");
-  }, [draft, store, view.send.state]);
+    // 思考级别住在 modelSelection.options 里:只改档位时用会话当前模型补齐(见 buildSendOptions)。
+    const result = await store.send(text, buildSendOptions(draftConfig, resolveBaseModel(view.config)));
+    if (result.state === "idle") {
+      setDraft("");
+      setComposerHint(null);
+    }
+  }, [draft, draftConfig, store, view.send.state, view.config]);
 
-  const renderRow = useCallback(({ item }: { item: ConversationRow }) => {
-    switch (item.kind) {
-      case "userInput":
+  const toggleTurn = useCallback((turnId: string, next: boolean) => {
+    setExpandedTurns((current) => ({ ...current, [turnId]: next }));
+  }, []);
+
+  const renderItem = useCallback(
+    ({ item }: { item: TurnRenderItem }) => {
+      if (item.kind === "user") {
         return (
           <View style={[styles.row, styles.userRow]}>
             <Text style={styles.userLabel}>你</Text>
-            <Text style={styles.userText}>{item.text}</Text>
-          </View>
-        );
-      case "assistantText":
-        return (
-          <View style={styles.row}>
-            <Text style={styles.assistantText}>
-              {item.text}
-              {item.state === "streaming" ? <Text style={styles.cursor}>▍</Text> : null}
-            </Text>
-            {item.state === "interrupted" || item.state === "failed" ? (
-              <Text style={styles.rowHint}>
-                {item.state === "interrupted" ? "已被中断" : "生成失败"}
-              </Text>
-            ) : null}
-          </View>
-        );
-      case "reasoning":
-        return (
-          <View style={styles.row}>
-            <Text style={styles.rowHint}>
-              {item.state === "streaming"
-                ? "思考中…"
-                : `思考${item.durationMs ? ` · ${Math.round(item.durationMs / 1000)}s` : ""}`}
-            </Text>
-            {item.state !== "streaming" && item.text.trim().length > 0 ? (
-              <Text style={styles.reasoningText}>
-                {truncateLines(item.text, 3, 240)}
-              </Text>
-            ) : null}
-          </View>
-        );
-      case "toolCall": {
-        const detail = toolDetail(item);
-        return (
-          <View style={styles.toolCard}>
-            <View style={styles.toolHeader}>
-              <Text style={styles.toolName} numberOfLines={1}>
-                {item.toolName}
-              </Text>
-              <Text
-                style={[
-                  styles.toolStatus,
-                  { color: TOOL_STATUS_COLOR[item.status] ?? theme.foregroundSubtle },
-                ]}
-              >
-                {TOOL_STATUS_LABEL[item.status] ?? item.status}
-              </Text>
-            </View>
-            {detail ? (
-              <Text style={item.error ? styles.toolError : styles.toolOutput} numberOfLines={6}>
-                {detail}
-              </Text>
-            ) : null}
-            {item.progress ? (
-              <Text style={styles.rowHint}>
-                {item.progress.bytes > 0 ? `${Math.round(item.progress.bytes / 1024)} KB` : ""}
-                {item.progress.previewLine ? ` · ${item.progress.previewLine}` : ""}
-              </Text>
-            ) : null}
+            <Text style={styles.userText}>{item.row.text}</Text>
           </View>
         );
       }
-      case "subagent": {
-        const childSessionId = item.childSessionId;
-        const canDrill = Boolean(childSessionId && onOpenSession);
-        const content = (
-          <View style={styles.row}>
-            <Text style={styles.rowHint}>
-              子代理 · {SUBAGENT_STATUS_LABEL[item.status] ?? item.status}
-              {canDrill ? " · 点开查看" : ""}
+      if (item.kind === "row") {
+        return <SessionRowView row={item.row} {...(onOpenSession ? { onOpenSession } : {})} />;
+      }
+      const open = expandedTurns[item.turnId] ?? item.defaultOpen;
+      return (
+        <View style={styles.processBlock}>
+          <Pressable style={styles.processHeader} onPress={() => toggleTurn(item.turnId, !open)}>
+            <Text style={styles.processLabel} numberOfLines={1}>
+              {item.label}
+              {item.fileChanges ? ` · ${describeFileChanges(item.fileChanges)}` : ""}
             </Text>
-            {item.summaryText.trim().length > 0 ? (
-              <Text style={styles.toolOutput}>{truncateLines(item.summaryText, 3, 240)}</Text>
-            ) : null}
-          </View>
-        );
-        // childSessionId 存在即可下钻:与桌面一致,子会话是独立订阅,不内嵌 child rows。
-        return canDrill ? (
-          <Pressable
-            onPress={() =>
-              onOpenSession?.({ sessionId: childSessionId!, title: `${item.subagentType} 子会话` })
-            }
-          >
-            {content}
+            <Text style={styles.processChevron}>{open ? "收起" : "查看过程"}</Text>
           </Pressable>
-        ) : (
-          content
-        );
-      }
-      case "turnHeader":
-        return (
-          <View style={styles.turnDivider}>
-            <Text style={styles.turnText}>
-              {new Date(item.createdAt).toLocaleTimeString()} ·{" "}
-              {item.origin === "userInput" ? "本轮" : item.origin}
-            </Text>
-          </View>
-        );
-      case "timelineMarker":
-        return (
-          <View style={styles.turnDivider}>
-            <Text style={styles.turnText}>{item.marker.type}</Text>
-          </View>
-        );
-      case "artifact":
-        return (
-          <View style={styles.toolCard}>
-            <Text style={styles.toolName} numberOfLines={1}>
-              产物 · {item.artifactType}
-            </Text>
-            <Text style={styles.toolOutput} numberOfLines={1}>
-              {item.displayName}
-            </Text>
-          </View>
-        );
-      case "hookInvocation":
-        return (
-          <View style={styles.row}>
-            <Text style={styles.rowHint}>
-              Hook · {item.hookEventName}
-              {item.hookCount > 1 ? ` ×${item.hookCount}` : ""}
-            </Text>
-          </View>
-        );
-      default:
-        return null;
-    }
-  }, [onOpenSession]);
+          {open ? (
+            <View style={styles.processBody}>
+              {item.rows.map((row) => (
+                <SessionRowView
+                  key={row.rowId}
+                  row={row}
+                  {...(onOpenSession ? { onOpenSession } : {})}
+                />
+              ))}
+            </View>
+          ) : null}
+        </View>
+      );
+    },
+    [expandedTurns, onOpenSession, toggleTurn],
+  );
 
   const planSuffix = planProgress
     ? ` · 计划 ${planProgress.completed}/${planProgress.total}`
@@ -300,9 +257,13 @@ export function SessionScreen({
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      // 两端统一 padding:RN 0.86 的位移计算是 frame.y+frame.height-keyboardY,
+      // 本屏铺满整屏(覆盖层从 0 起),padding 恰好等于键盘高度,composer 精确抬到键盘上沿。
+      // Android 此前依赖的 adjustResize 在 targetSdk35+edge-to-edge 下已被系统停用,
+      // 必须走 JS 侧避让。
+      behavior="padding"
     >
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <Pressable style={styles.backButton} onPress={onBack}>
           <Text style={styles.backText}>‹ 返回</Text>
         </Pressable>
@@ -338,48 +299,81 @@ export function SessionScreen({
           </Pressable>
         ) : null}
       </View>
+      <ConfigPickerSheet
+        target={pickerTarget}
+        modelOptions={modelOptions}
+        loadingModels={loadingModels}
+        draft={draftConfig}
+        thoughtLevels={draftSummary.thoughtLevels}
+        {...(view.config?.thought ? { currentThought: view.config.thought } : {})}
+        usage={view.usage}
+        onPickModel={(option) => {
+          // 换模型后旧档位可能不被支持:一并清掉草稿级思考级别(与会话级解耦)。
+          setDraftConfig((current) => {
+            const { reasoningLevel: _dropped, ...rest } = current;
+            return { ...rest, model: { providerId: option.providerId, modelId: option.modelId } };
+          });
+          setPickerTarget(null);
+        }}
+        onPickMode={(mode) => {
+          setDraftConfig((current) => ({ ...current, mode }));
+          setPickerTarget(null);
+        }}
+        onTogglePlan={(enabled) =>
+          setDraftConfig((current) => ({ ...current, planEnabled: enabled }))
+        }
+        onPickThought={(value) => {
+          setDraftConfig((current) => {
+            const { reasoningLevel: _dropped, ...rest } = current;
+            return value === undefined ? rest : { ...rest, reasoningLevel: value };
+          });
+          setPickerTarget(null);
+        }}
+        onClose={() => setPickerTarget(null)}
+      />
       {view.stop.state === "rejected" ? (
         <Text style={styles.sendError}>{view.stop.message ?? "中断失败"}</Text>
       ) : null}
 
+      <SessionStatusBar
+        plan={view.plan}
+        backgroundWorks={view.backgroundWorks}
+        workflowRuns={view.workflowRuns}
+        queue={view.queue}
+        availability={view.availability}
+        disabled={reconnecting || view.response.state === "sending"}
+        {...(view.response.state === "rejected" && view.response.message
+          ? { errorMessage: view.response.message }
+          : {})}
+        onCancelWork={(workId) => void store.cancelBackgroundWork(workId)}
+        onPromote={(queueItemId) => void store.promoteQueuedItem(queueItemId)}
+        onRemove={(queueItemId) => void store.removeQueuedItem(queueItemId)}
+      />
+
       <FlatList
         ref={listRef}
-        data={view.rows}
-        keyExtractor={(row) => String(row.rowId)}
-        renderItem={renderRow}
+        data={items}
+        keyExtractor={(item) => item.key}
+        renderItem={renderItem}
         contentContainerStyle={styles.listContent}
         onScroll={handleScroll}
         onContentSizeChange={() => {
-          if (stickToBottom.current) scrollToEnd();
+          // 只看尾部行是否变化:前插历史也会改变 contentSize,若一律滚到底
+          // 会把正在看历史的用户拽回底部。
+          const tailKey = view.rows.length > 0 ? view.rows[view.rows.length - 1]!.rowId : -1;
+          if (tailKey !== lastTailRowId.current) {
+            lastTailRowId.current = tailKey;
+            scrollToEnd();
+          }
         }}
+        // 滚到顶部附近即自动加载更早的历史(不再有底部按钮);
+        // maintainVisibleContentPosition 保证前插时视口不跳。
+        onStartReached={handleStartReached}
+        onStartReachedThreshold={0.4}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         ListHeaderComponent={
-          planProgress ? (
-            <View style={styles.planCard}>
-              <Text style={styles.planTitle}>
-                计划 {planProgress.completed}/{planProgress.total}
-                {planProgress.inProgress > 0 ? ` · ${planProgress.inProgress} 进行中` : ""}
-              </Text>
-              {planProgress.items.map((item) => (
-                <Text key={item.id} style={styles.planItem} numberOfLines={2}>
-                  {item.status === "completed" ? "✓" : item.status === "inProgress" ? "▸" : "·"}{" "}
-                  {item.content}
-                </Text>
-              ))}
-            </View>
-          ) : null
-        }
-        ListHeaderComponentStyle={styles.listHeader}
-        ListFooterComponent={
-          view.rows.length > 0 && !view.atTop ? (
-            <Pressable
-              style={styles.loadOlder}
-              disabled={view.loadingOlder}
-              onPress={() => void store.loadOlder()}
-            >
-              <Text style={styles.loadOlderText}>
-                {view.loadingOlder ? "加载中…" : "加载更早的消息"}
-              </Text>
-            </Pressable>
+          view.loadingOlder ? (
+            <Text style={styles.loadOlderText}>正在加载更早…</Text>
           ) : null
         }
         ListEmptyComponent={
@@ -399,34 +393,32 @@ export function SessionScreen({
             ? { errorMessage: view.response.message }
             : {})}
           onRespond={(answer) => void store.respond(interactionCard.interactionId, answer)}
+          onInteract={() => void store.snoozeInteraction(interactionCard.interactionId)}
         />
       ) : null}
       {view.send.state === "rejected" ? (
         <Text style={styles.sendError}>{view.send.message ?? "发送失败"}</Text>
       ) : null}
-      <View style={styles.composer}>
-        <TextInput
-          style={styles.input}
-          value={draft}
-          onChangeText={setDraft}
-          placeholder="输入消息…"
-          placeholderTextColor={theme.foregroundSubtle}
-          multiline
-          editable={view.status !== "error" && !reconnecting}
-        />
-        <Pressable
-          style={[
-            styles.sendButton,
-            draft.trim().length === 0 || view.send.state === "sending" || reconnecting
-              ? styles.sendButtonDisabled
-              : null,
-          ]}
-          disabled={draft.trim().length === 0 || view.send.state === "sending" || reconnecting}
-          onPress={() => void handleSend()}
-        >
-          <Text style={styles.sendText}>{view.send.state === "sending" ? "发送中" : "发送"}</Text>
-        </Pressable>
-      </View>
+      <SessionComposer
+        draft={draft}
+        onChangeDraft={setDraft}
+        placeholder={composerPlaceholder}
+        editable={view.status !== "error" && !reconnecting}
+        sending={view.send.state === "sending"}
+        reconnecting={reconnecting}
+        labels={{
+          mode: draftSummary.mode,
+          model: draftSummary.model,
+          thought: draftSummary.thought,
+        }}
+        hint={composerHint}
+        onHint={setComposerHint}
+        onOpenPicker={(target) =>
+          setPickerTarget((current) => (current === target ? null : target))
+        }
+        onSend={() => void handleSend()}
+        bottomInset={insets.bottom}
+      />
     </KeyboardAvoidingView>
   );
 }

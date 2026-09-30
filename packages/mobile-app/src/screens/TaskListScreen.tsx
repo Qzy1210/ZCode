@@ -1,30 +1,39 @@
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+/* 任务列表:项目卡片 + 任务行。
+ *
+ * 展示规则(对齐移动端设计稿):
+ * - 每个项目是一张卡片:文件夹图标 + 名称 + 类型徽标 / 路径 / 「更新于 X」+「N 个任务 ▾」+「＋」;
+ * - 任务行在卡片内,缩进一级:标题 + 相对时间在左,状态徽标右对齐;
+ * - 点项目行折叠/展开任务(折叠是纯本地 UI 状态,不碰订阅)。
+ *
+ * 数据全部来自 taskStore(单一所有者);本组件只做派生与渲染。
+ */
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import type { RemoteServiceAccess } from "@zcode/client";
 
 import { createTaskStore, workspaceKeyOf, type TaskStoreSnapshot } from "../taskStore";
 import { formatRelativeTime, taskStatusColor, theme } from "../theme";
 
-type ListRow =
-  | {
-      kind: "workspace";
-      key: string;
-      title: string;
-      path: string;
-      kindLabel: string;
-      taskCount: number;
-    }
-  | {
-      kind: "task";
-      key: string;
-      title: string;
-      status: string;
-      updatedAt: number;
-      /** 打开会话所需的三元组:与 controller 任务行 meta 一致(taskId === sessionId)。 */
-      taskId: string;
-      workspacePath: string;
-      workspaceIdentity?: string;
-    };
+/** 列表项:一个项目及其任务(taskId === sessionId)。 */
+interface WorkspaceCard {
+  key: string;
+  /** workspaceKeyOf 的原始结果:折叠集合的 key。 */
+  workspaceKey: string;
+  title: string;
+  path: string;
+  kindLabel: string;
+  /** 该项目下最近一次任务更新时间(无任务时为空,不显示"更新于")。 */
+  updatedAt: number | null;
+  workspacePath: string;
+  workspaceIdentity?: string;
+  tasks: Array<{
+    taskId: string;
+    title: string;
+    status: string;
+    updatedAt: number;
+  }>;
+}
 
 const STATUS_LABEL: Record<string, string> = {
   running: "运行中",
@@ -45,6 +54,8 @@ export function TaskListScreen({
   onDisconnect,
   onForgetDevice,
   onOpenTask,
+  onCreateTask,
+  createTaskError = null,
   reconnecting = false,
 }: {
   services: RemoteServiceAccess;
@@ -54,6 +65,10 @@ export function TaskListScreen({
   reconnecting?: boolean;
   onDisconnect: () => void;
   onForgetDevice: () => void;
+  /** 新建任务:由 App 发 createSession 并进入会话屏(草稿会话,首条消息后才落库)。 */
+  onCreateTask?: (target: { workspacePath: string; workspaceIdentity?: string }) => void;
+  /** 新建任务失败原因。 */
+  createTaskError?: string | null;
   /** 打开任务会话:由 App 切换到会话屏(P2)。 */
   onOpenTask: (target: {
     taskId: string;
@@ -70,8 +85,22 @@ export function TaskListScreen({
     store.getSnapshot,
   );
 
-  const rows = useMemo(() => {
-    const result: ListRow[] = [];
+  /**
+   * 折叠的项目 key(workspaceKeyOf 的结果):默认全部展开。
+   * key 失效(项目消失)时条目自动无害化。
+   */
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleWorkspace = (key: string) => {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const cards = useMemo(() => {
+    const result: WorkspaceCard[] = [];
     for (const workspace of snapshot.workspaces) {
       const key = workspaceKeyOf(workspace);
       const workspaceTasks = snapshot.tasks.filter((row) => workspaceKeyOf(row.meta) === key);
@@ -81,28 +110,55 @@ export function TaskListScreen({
           ? "对话"
           : "本地";
       result.push({
-        kind: "workspace",
         key: `workspace:${key}`,
+        workspaceKey: key,
         title: lastPathSegment(workspace.workspacePath),
         path: workspace.workspacePath,
         kindLabel,
-        taskCount: workspaceTasks.length,
-      });
-      for (const task of workspaceTasks) {
-        result.push({
-          kind: "task",
-          key: `task:${key}\0${task.meta.taskId}`,
+        updatedAt:
+          workspaceTasks.length > 0
+            ? Math.max(...workspaceTasks.map((row) => row.meta.updatedAt))
+            : null,
+        workspacePath: workspace.workspacePath,
+        ...(workspace.workspaceIdentity ? { workspaceIdentity: workspace.workspaceIdentity } : {}),
+        tasks: workspaceTasks.map((task) => ({
+          taskId: task.meta.taskId,
           title: task.meta.title.trim() || "未命名任务",
           status: task.liveStatus,
           updatedAt: task.meta.updatedAt,
-          taskId: task.meta.taskId,
-          workspacePath: task.meta.workspacePath,
-          ...(task.meta.workspaceIdentity ? { workspaceIdentity: task.meta.workspaceIdentity } : {}),
-        });
-      }
+        })),
+      });
     }
     return result;
   }, [snapshot]);
+
+  const renderTaskRow = (card: WorkspaceCard, task: WorkspaceCard["tasks"][number]) => (
+    <Pressable
+      key={task.taskId}
+      style={styles.taskRow}
+      accessibilityRole="button"
+      onPress={() =>
+        onOpenTask({
+          taskId: task.taskId,
+          title: task.title,
+          workspacePath: card.workspacePath,
+          ...(card.workspaceIdentity ? { workspaceIdentity: card.workspaceIdentity } : {}),
+        })
+      }
+    >
+      <View style={styles.taskBody}>
+        <Text style={styles.taskTitle} numberOfLines={2}>
+          {task.title}
+        </Text>
+        <Text style={styles.taskTime}>{formatRelativeTime(task.updatedAt)}</Text>
+      </View>
+      <Text
+        style={[styles.taskStatus, { color: taskStatusColor[task.status] ?? theme.foregroundSubtle }]}
+      >
+        {STATUS_LABEL[task.status] ?? task.status}
+      </Text>
+    </Pressable>
+  );
 
   return (
     <View style={styles.container}>
@@ -142,60 +198,92 @@ export function TaskListScreen({
         </View>
       </View>
 
+      {createTaskError ? (
+        <Text style={styles.createTaskError}>新建任务失败：{createTaskError}</Text>
+      ) : null}
       <FlatList
-        data={rows}
-        keyExtractor={(row) => row.key}
+        data={cards}
+        keyExtractor={(card) => card.key}
         contentContainerStyle={styles.listContent}
         ListEmptyComponent={
           snapshot.status === "ready" ? (
             <Text style={styles.emptyText}>当前桌面窗口没有可展示的工作区</Text>
+          ) : snapshot.status === "error" ? (
+            // 订阅超时/失败时必须给出出口,否则用户只能杀进程(此前就是如此)。
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>同步失败,可能是连接已断开</Text>
+              <Pressable style={styles.retryButton} onPress={() => store.retry()}>
+                <Text style={styles.retryText}>重试</Text>
+              </Pressable>
+            </View>
           ) : null
         }
-        renderItem={({ item }) =>
-          item.kind === "workspace" ? (
-            <View style={styles.workspaceHeader}>
-              <View style={styles.workspaceTitleRow}>
-                <Text style={styles.workspaceTitle} numberOfLines={1}>
-                  {item.title}
-                </Text>
-                <View style={styles.kindBadge}>
-                  <Text style={styles.kindBadgeText}>{item.kindLabel}</Text>
+        renderItem={({ item: card }) => {
+          const isCollapsed = collapsed.has(card.workspaceKey);
+          return (
+            <View style={styles.workspaceCard}>
+              <Pressable
+                style={styles.workspaceRow}
+                accessibilityRole="button"
+                accessibilityLabel={`${card.title},${isCollapsed ? "展开" : "收起"}任务`}
+                onPress={() => toggleWorkspace(card.workspaceKey)}
+              >
+                <MaterialCommunityIcons
+                  name="folder-outline"
+                  size={19}
+                  color={theme.foregroundSubtle}
+                  style={styles.folderIcon}
+                />
+                <View style={styles.workspaceBody}>
+                  <View style={styles.workspaceTitleRow}>
+                    <Text style={styles.workspaceTitle} numberOfLines={1}>
+                      {card.title}
+                    </Text>
+                    <View style={styles.kindBadge}>
+                      <Text style={styles.kindBadgeText}>{card.kindLabel}</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.workspacePath} numberOfLines={1}>
+                    {card.path}
+                  </Text>
+                  <View style={styles.workspaceMetaRow}>
+                    {card.updatedAt !== null ? (
+                      <Text style={styles.workspaceUpdated}>
+                        更新于 {formatRelativeTime(card.updatedAt)}
+                      </Text>
+                    ) : null}
+                    <Text style={styles.workspaceCount}>
+                      {card.tasks.length} 个任务 {isCollapsed ? "▸" : "▾"}
+                    </Text>
+                  </View>
                 </View>
-                <Text style={styles.workspaceCount}>{item.taskCount} 个任务</Text>
-              </View>
-              <Text style={styles.workspacePath} numberOfLines={1}>
-                {item.path}
-              </Text>
+                {onCreateTask && !reconnecting ? (
+                  <Pressable
+                    style={styles.createTaskButton}
+                    accessibilityRole="button"
+                    accessibilityLabel={`在 ${card.title} 新建任务`}
+                    hitSlop={8}
+                    onPress={() =>
+                      onCreateTask({
+                        workspacePath: card.workspacePath,
+                        ...(card.workspaceIdentity
+                          ? { workspaceIdentity: card.workspaceIdentity }
+                          : {}),
+                      })
+                    }
+                  >
+                    <Text style={styles.createTaskText}>＋</Text>
+                  </Pressable>
+                ) : null}
+              </Pressable>
+              {!isCollapsed && card.tasks.length > 0 ? (
+                <View style={styles.taskGroup}>
+                  {card.tasks.map((task) => renderTaskRow(card, task))}
+                </View>
+              ) : null}
             </View>
-          ) : (
-            <Pressable
-              style={styles.taskRow}
-              onPress={() =>
-                onOpenTask({
-                  taskId: item.taskId,
-                  title: item.title,
-                  workspacePath: item.workspacePath,
-                  ...(item.workspaceIdentity ? { workspaceIdentity: item.workspaceIdentity } : {}),
-                })
-              }
-            >
-              <View
-                style={[
-                  styles.taskStatusDot,
-                  { backgroundColor: taskStatusColor[item.status] ?? theme.foregroundSubtle },
-                ]}
-              />
-              <View style={styles.taskBody}>
-                <Text style={styles.taskTitle} numberOfLines={2}>
-                  {item.title}
-                </Text>
-                <Text style={styles.taskMeta}>
-                  {STATUS_LABEL[item.status] ?? item.status} · {formatRelativeTime(item.updatedAt)}
-                </Text>
-              </View>
-            </Pressable>
-          )
-        }
+          );
+        }}
       />
     </View>
   );
@@ -227,15 +315,26 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   disconnectText: { color: theme.foregroundSubtle, fontSize: 13 },
-  listContent: { paddingBottom: 32 },
-  workspaceHeader: {
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 8,
-    gap: 2,
+  listContent: { paddingHorizontal: 10, paddingTop: 10, paddingBottom: 32, gap: 10 },
+  /** 项目卡片:头部 + 任务行同一张卡,靠边界表达层级。 */
+  workspaceCard: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    borderRadius: 12,
+    backgroundColor: theme.card,
+    overflow: "hidden",
   },
+  workspaceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  folderIcon: { marginTop: 1 },
+  workspaceBody: { flex: 1, gap: 2 },
   workspaceTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  workspaceTitle: { color: theme.foreground, fontSize: 15, fontWeight: "600", maxWidth: "60%" },
+  workspaceTitle: { color: theme.foreground, fontSize: 15, fontWeight: "600", flexShrink: 1 },
   kindBadge: {
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
@@ -244,18 +343,53 @@ const styles = StyleSheet.create({
     paddingVertical: 1,
   },
   kindBadgeText: { color: theme.foregroundSubtle, fontSize: 10 },
-  workspaceCount: { color: theme.foregroundSubtle, fontSize: 11, marginLeft: "auto" },
   workspacePath: { color: theme.foregroundSubtle, fontSize: 11 },
+  workspaceMetaRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  workspaceUpdated: { color: theme.foregroundSubtle, fontSize: 11 },
+  workspaceCount: { color: theme.foregroundSubtle, fontSize: 11, marginLeft: "auto" },
+  createTaskButton: {
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    width: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  createTaskText: { color: theme.info, fontSize: 15, lineHeight: 18 },
+  createTaskError: {
+    color: theme.destructive,
+    fontSize: 12,
+    paddingHorizontal: 16,
+    paddingBottom: 6,
+  },
+  /** 任务行:缩进一级;标题/时间在左,状态徽标右对齐。 */
+  taskGroup: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: theme.border,
+    paddingVertical: 2,
+  },
   taskRow: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     gap: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingLeft: 40,
+    paddingRight: 12,
+    paddingVertical: 9,
   },
-  taskStatusDot: { width: 8, height: 8, borderRadius: 4, marginTop: 6 },
   taskBody: { flex: 1, gap: 3 },
   taskTitle: { color: theme.foreground, fontSize: 14, lineHeight: 20 },
-  taskMeta: { color: theme.foregroundSubtle, fontSize: 11 },
+  taskTime: { color: theme.foregroundSubtle, fontSize: 11 },
+  taskStatus: { fontSize: 11 },
   emptyText: { color: theme.foregroundSubtle, fontSize: 13, textAlign: "center", paddingTop: 48 },
+  errorBox: { alignItems: "center", gap: 12, paddingTop: 48, paddingHorizontal: 24 },
+  errorText: { color: theme.destructive, fontSize: 13, textAlign: "center" },
+  retryButton: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  retryText: { color: theme.foreground, fontSize: 13 },
 });

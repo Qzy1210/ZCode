@@ -3,11 +3,13 @@
  * 只消费 interactionModel 给出的视图模型,自己不做协议判断;
  * 所有提交都通过 onRespond(answer) 回传 store,由 store 走 resolveInteraction。
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 
 import type { InteractionAnswer } from "../conversation/conversationTransport";
 import {
+  describeAutoResolution,
+  describeCountdown,
   buildDeclineAnswer,
   buildLegacyUserInputAnswer,
   buildPermissionAnswer,
@@ -81,17 +83,41 @@ export function InteractionCard({
   busy,
   errorMessage,
   onRespond,
+  onInteract,
 }: {
   card: InteractionCardModel;
   busy: boolean;
   errorMessage?: string;
   onRespond: (answer: InteractionAnswer) => void;
+  /** 用户开始作答:暂停服务端的自动结束倒计时(幂等,只发一次)。 */
+  onInteract?: () => void;
 }) {
   const [feedback, setFeedback] = useState("");
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const snoozedRef = useRef(false);
   const [selectedByQuestion, setSelectedByQuestion] = useState<Record<string, string[]>>({});
   const [customByQuestion, setCustomByQuestion] = useState<Record<string, string>>({});
   const [legacyOption, setLegacyOption] = useState<string | null>(null);
   const [legacyText, setLegacyText] = useState("");
+
+  const autoResolution = describeAutoResolution(
+    card.kind === "unsupported" ? undefined : card.autoResolution,
+    nowMs,
+  );
+  const hasCountdown = autoResolution.mode === "countdown" || autoResolution.mode === "hidden";
+
+  useEffect(() => {
+    if (!hasCountdown) return;
+    const timer = setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [hasCountdown]);
+
+  /** 首次交互即暂停倒计时:与服务端 first-writer-wins 一致,重复发送无副作用。 */
+  const markInteracted = () => {
+    if (snoozedRef.current) return;
+    snoozedRef.current = true;
+    onInteract?.();
+  };
 
   const questions = card.kind === "question" ? card.questions : [];
   const selections = useMemo(
@@ -109,6 +135,7 @@ export function InteractionCard({
   );
 
   const toggleOption = (question: QuestionModel, value: string) => {
+    markInteracted();
     setSelectedByQuestion((current) => {
       const values = current[question.question] ?? [];
       if (!question.multiSelect) {
@@ -134,6 +161,9 @@ export function InteractionCard({
     <View style={styles.card}>
       <View style={styles.header}>
         <Text style={styles.title}>{title}</Text>
+        {autoResolution.mode === "countdown" ? (
+          <Text style={styles.countdown}>{describeCountdown(autoResolution.remainingMs)}</Text>
+        ) : null}
         {card.kind === "permission" ? (
           <Text style={styles.badge} numberOfLines={1}>
             {card.toolName}
@@ -157,7 +187,10 @@ export function InteractionCard({
                   key={option.optionId}
                   disabled={busy}
                   style={[styles.button, deny ? styles.buttonDanger : styles.buttonPrimary, busy ? styles.buttonDisabled : null]}
-                  onPress={() => onRespond(buildPermissionAnswer(option.optionId, feedback))}
+                  onPress={() => {
+                    markInteracted();
+                    onRespond(buildPermissionAnswer(option.optionId, feedback));
+                  }}
                 >
                   <Text style={deny ? styles.buttonDangerText : styles.buttonPrimaryText}>
                     {option.label}
@@ -194,14 +227,20 @@ export function InteractionCard({
             <Pressable
               disabled={busy}
               style={[styles.button, styles.buttonPrimary, busy ? styles.buttonDisabled : null]}
-              onPress={() => onRespond(buildPlanAnswer("approve"))}
+              onPress={() => {
+                markInteracted();
+                onRespond(buildPlanAnswer("approve"));
+              }}
             >
               <Text style={styles.buttonPrimaryText}>批准并开始实施</Text>
             </Pressable>
             <Pressable
               disabled={busy}
               style={[styles.button, styles.buttonDanger, busy ? styles.buttonDisabled : null]}
-              onPress={() => onRespond(buildPlanAnswer("decline", feedback))}
+              onPress={() => {
+                markInteracted();
+                onRespond(buildPlanAnswer("decline", feedback));
+              }}
             >
               <Text style={styles.buttonDangerText}>拒绝</Text>
             </Pressable>
@@ -259,7 +298,8 @@ export function InteractionCard({
             <Pressable
               disabled={busy}
               style={[styles.button, styles.buttonPrimary, busy ? styles.buttonDisabled : null]}
-              onPress={() =>
+              onPress={() => {
+                markInteracted();
                 onRespond(
                   questions.length > 0
                     ? buildQuestionAnswer(selections)
@@ -267,15 +307,18 @@ export function InteractionCard({
                         ...(legacyOption ? { optionId: legacyOption } : {}),
                         ...(legacyText.trim() ? { freeText: legacyText } : {}),
                       }),
-                )
-              }
+                );
+              }}
             >
               <Text style={styles.buttonPrimaryText}>提交</Text>
             </Pressable>
             <Pressable
               disabled={busy}
               style={[styles.button, styles.buttonDanger, busy ? styles.buttonDisabled : null]}
-              onPress={() => onRespond(buildDeclineAnswer())}
+              onPress={() => {
+                markInteracted();
+                onRespond(buildDeclineAnswer());
+              }}
             >
               <Text style={styles.buttonDangerText}>拒绝</Text>
             </Pressable>
@@ -301,6 +344,7 @@ const styles = StyleSheet.create({
   header: { flexDirection: "row", alignItems: "center", gap: 8 },
   title: { color: theme.warning, fontSize: 13, fontWeight: "600" },
   badge: { color: theme.foregroundSubtle, fontSize: 11, flexShrink: 1 },
+  countdown: { color: theme.warning, fontSize: 11, marginLeft: "auto" },
   summary: { color: theme.foreground, fontSize: 13, lineHeight: 19 },
   detail: { color: theme.foregroundSubtle, fontSize: 11, lineHeight: 16 },
   buttonRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
