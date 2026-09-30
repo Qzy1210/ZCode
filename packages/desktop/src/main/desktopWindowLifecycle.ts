@@ -28,10 +28,12 @@ export function createWindow(options: {
   forceQuitRef: { current: boolean };
   handleBeforeClose?: (win: BrowserWindow, label: string) => boolean;
   windowHostProcessMap: Map<number, ElectronUtilityProcess>;
+  // 注入方(main)负责补 zcodeBuiltinProviderConfigFilePath:它掌握 Electron 安装布局,
+  // 而本模块只组装窗口相关的初始化字段。类型按 Omit 表达,别让"待补全的消息"装作完整契约。
   spawnHostProcess: (
     win: BrowserWindow,
     label: string,
-    initMessage: HostInitMessage,
+    initMessage: Omit<HostInitMessage, "zcodeBuiltinProviderConfigFilePath">,
   ) => ElectronUtilityProcess;
   disposeHostProcess: (
     child: ElectronUtilityProcess,
