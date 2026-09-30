@@ -1,6 +1,10 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    // 这两个工程的 outDir 与 tsup 的打包产物同名(out/main/index.js、out/preload/index.js
+    // 是 Electron 入口)。tsc 只做类型检查 + 声明产物,别把未打包的 .js 写到入口路径上——
+    // 那会让不重新构建的启动加载到非 tsup 产物。
+    "emitDeclarationOnly": true,
     "outDir": "out/preload",
     "rootDir": "src",
     "lib": ["es2025", "dom"]
