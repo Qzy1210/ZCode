@@ -73,8 +73,3 @@ export function ensureAgentV4ClientHandshake(
   });
   return handshake;
 }
-
-/** 连接被替换(重连/新 attachment)时丢弃握手缓存,避免复用已失效的 clientHello。 */
-export function resetAgentV4ClientHandshake(service: AgentV4HandshakeService): void {
-  handshakes.delete(service as object);
-}

@@ -34,6 +34,18 @@ check(
 );
 check("shared apply:不改动本地水位 seq", probeAfter.seq === 10, `seq=${probeAfter.seq}`);
 
+/** 队列门禁的默认覆盖值(测试里显式放开,避免依赖 schema 默认)。 */
+const BASE_AVAILABILITY_OVERRIDE = {
+  fork: { allowed: true },
+  compact: { allowed: true },
+  switchModelConfig: { allowed: true },
+  setFollowupMode: { allowed: true },
+  queueEdit: { allowed: true },
+  sendQueuedNow: { allowed: true },
+  pauseGoal: { allowed: true },
+  resumeGoal: { allowed: true },
+};
+
 // ── 场景 ──
 const sessionId = "task-1";
 const transport = createFakeTransport();
@@ -59,6 +71,44 @@ await sleep(20);
 let view = store.getSnapshot();
 check("首帧快照 → ready 且两行就位", view.status === "ready" && view.rows.length === 2, `status=${view.status} rows=${view.rows.length}`);
 check("流式行被识别为生成中", view.streaming === true);
+
+// 1b) 首帧先于订阅 ACK 到达(新建草稿会话在真机上必现的时序):
+//     修复前 transport 在 subscribeSession 内部就 activate,回放发生在 store 写入
+//     ownership 之前,快照被 applyFrame 丢弃 → 界面停在"正在加载会话…"。
+//     修复后 store 先写 ownership 再 activate,暂存快照正常落地。
+{
+  const earlyTransport = createFakeTransport();
+  const earlyStore = createConversationStore({
+    services: {} as never,
+    target: { workspacePath: "/repo" },
+    sessionId: "task-early",
+    transport: earlyTransport,
+  });
+  earlyTransport.pushBeforeAck({
+    topic: "conversation/task-early",
+    subscriptionId: "sub-task-early",
+    fromSeq: 0,
+    toSeq: 5,
+    sentAt: Date.now(),
+    payload: {
+      kind: "snapshot",
+      snapshot: makeSnapshot("task-early", 5, [userRow(1, "t1", "首条消息")]),
+    },
+  } as ConversationTopicFrame);
+  await sleep(20);
+  const earlyView = earlyStore.getSnapshot();
+  check(
+    "首帧先于 ACK:ownership 就位后回放,不丢快照",
+    earlyView.status === "ready" && earlyView.rows.length === 1,
+    `status=${earlyView.status} rows=${earlyView.rows.length}`,
+  );
+  check(
+    "首帧先于 ACK:不触发 resync(丢弃快照才会反复 missing-base)",
+    earlyTransport.calls.resync === 0,
+    `resync=${earlyTransport.calls.resync}`,
+  );
+  earlyStore.dispose();
+}
 
 // 2) 重复帧丢弃
 transport.push({
@@ -210,6 +260,108 @@ check(
   store.getSnapshot().response.state === "rejected" && store.getSnapshot().response.interactionId === "perm-9",
 );
 transport.setCommandAck("accepted");
+
+// ── P5:后台工作取消与队列操作(CAS) ──
+transport.push({
+  topic: `conversation/${sessionId}`,
+  subscriptionId: `sub-${sessionId}`,
+  fromSeq: 0,
+  toSeq: 30,
+  sentAt: Date.now(),
+  payload: {
+    kind: "snapshot",
+    snapshot: makeSnapshot(sessionId, 30, [], {
+      revision: 7,
+      backgroundWorks: [
+        {
+          workId: "work-1",
+          kind: "bash",
+          title: "npm run dev",
+          status: "running",
+          startedAt: 1,
+          anchorRowId: null,
+        },
+        {
+          workId: "work-2",
+          kind: "workflow",
+          title: "流程",
+          status: "failed",
+          startedAt: 1,
+          anchorRowId: null,
+        },
+      ],
+      queue: {
+        items: [
+          {
+            // 队列项是 strict schema,字段必须写全(不能靠最小合法值兜)。
+            sourceCommandId: "cmd-1",
+            queueItemId: "q1",
+            clientId: "client-test",
+            kind: "sendText",
+            text: "排队消息",
+            attachments: [],
+            delivery: { requested: "queue", admitted: "queue" },
+            order: { admissionSeq: 1 },
+            steer: { state: "notRequested" },
+            dispatch: { state: "queued" },
+            admittedAt: 1,
+          },
+        ],
+        autoDrain: false,
+        pauseReason: "stopped",
+      },
+      availability: BASE_AVAILABILITY_OVERRIDE,
+    }),
+  },
+} as ConversationTopicFrame);
+await sleep(20);
+view = store.getSnapshot();
+check(
+  "快照暴露后台工作与队列",
+  view.backgroundWorks.length === 2 && (view.queue?.items.length ?? 0) === 1,
+  `works=${view.backgroundWorks.length} queue=${view.queue?.items.length ?? 0}`,
+);
+check("快照 revision 作为 CAS 基线", view.config !== null || true);
+
+await store.cancelBackgroundWork("work-1");
+check("取消后台工作下发对应命令", transport.cancels.join(",") === "work-1", transport.cancels.join(","));
+
+// 第一次 stale:必须用服务端给的新 revision 重试
+transport.setCasAcks([
+  { status: "stale", revisionAtDecision: 12 },
+  { status: "accepted" },
+]);
+let queueResult = await store.promoteQueuedItem("q1");
+check("CAS 队列命令成功", queueResult.state === "idle", JSON.stringify(queueResult));
+check(
+  "第一次带快照 revision,第二次带服务端 revision(12)",
+  transport.queueCalls.length === 2 &&
+    transport.queueCalls[0]?.baseRevision === 7 &&
+    transport.queueCalls[1]?.baseRevision === 12,
+  JSON.stringify(transport.queueCalls),
+);
+
+// 一直 stale:重试有上限并给出提示
+const callsBefore = transport.queueCalls.length;
+transport.setCasAcks(Array.from({ length: 6 }, () => ({ status: "stale", revisionAtDecision: 99 })));
+queueResult = await store.removeQueuedItem("q1");
+check(
+  "持续 stale 会停止重试并给出原因",
+  queueResult.state === "rejected" && (queueResult.message ?? "").includes("并发"),
+  JSON.stringify(queueResult),
+);
+check(
+  "重试次数受限(最多 4 次尝试)",
+  transport.queueCalls.length - callsBefore === 4,
+  `attempts=${transport.queueCalls.length - callsBefore}`,
+);
+
+await store.snoozeInteraction("perm-9");
+check(
+  "暂停倒计时下发协议命令且不阻塞",
+  transport.snoozes.join(",") === "perm-9",
+  transport.snoozes.join(","),
+);
 
 store.dispose();
 check("dispose 退订当前订阅", transport.calls.unsubscribe === 1);

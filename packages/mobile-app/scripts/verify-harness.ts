@@ -28,7 +28,7 @@ export function finish(): void {
   process.exit(failed.length === 0 ? 0 : 1);
 }
 
-function minimalValue(schema: unknown): unknown {
+export function minimalValue(schema: unknown): unknown {
   const current = schema as {
     def?: Record<string, unknown>;
     _zod?: { def?: Record<string, unknown> };
@@ -260,23 +260,38 @@ export function userRow(rowId: number, turnId: string, text: string): Conversati
 
 export interface FakeTransport extends ConversationTransport {
   push(frame: ConversationTopicFrame): void;
+  /** 模拟首帧先于订阅 ACK 到达(barrier 暂存,activate 时回放)。 */
+  pushBeforeAck(frame: ConversationTopicFrame): void;
   responds: Array<{ interactionId: string; answer: InteractionAnswer }>;
   stops: Array<string | undefined>;
+  /** 记录后台工作取消与队列操作(含每轮用的 baseRevision)。 */
+  cancels: string[];
+  /** 记录暂停倒计时的交互 id。 */
+  snoozes: string[];
+  queueCalls: Array<{ type: "sendQueuedNow" | "deleteQueueItem"; queueItemId: string; baseRevision: number }>;
+  /** 队列命令的 ACK 序列(用于验证 stale → revisionAtDecision 重试)。 */
+  setCasAcks(acks: Array<{ status: string; revisionAtDecision?: number; message?: string }>): void;
   setOlderPage(page: { rows: ConversationRow[]; hasMore: boolean }): void;
   setCommandAck(status: string): void;
   setSendAck(ack: { status: string; message?: string; reasonCode?: string }): void;
-  calls: { resync: number; loadOlder: number; unsubscribe: number; lastResyncBase: unknown };
+  calls: { resync: number; loadOlder: number; unsubscribe: number; activate: number; lastResyncBase: unknown };
 }
 
 export function createFakeTransport(): FakeTransport {
   const frameListeners = new Set<(frame: ConversationTopicFrame, deliveryKind: "initial" | "online" | "recovery") => void>();
   const issueListeners = new Set<(issue: { code: string; message: string }) => void>();
-  const calls = { resync: 0, loadOlder: 0, unsubscribe: 0, lastResyncBase: undefined as unknown };
+  const calls = { resync: 0, loadOlder: 0, unsubscribe: 0, activate: 0, lastResyncBase: undefined as unknown };
   let olderPage: { rows: ConversationRow[]; hasMore: boolean } = { rows: [], hasMore: false };
   let sendAck: { status: string; message?: string; reasonCode?: string } = { status: "accepted" };
   let commandAckStatus = "accepted";
   const responds: Array<{ interactionId: string; answer: InteractionAnswer }> = [];
   const stops: Array<string | undefined> = [];
+  const cancels: string[] = [];
+  const snoozes: string[] = [];
+  const queueCalls: Array<{ type: "sendQueuedNow" | "deleteQueueItem"; queueItemId: string; baseRevision: number }> = [];
+  let casAcks: Array<{ status: string; revisionAtDecision?: number; message?: string }> = [];
+  /** ACK 前到达的暂存帧:只在 activate(ownership 就位后)回放,模拟 barrier 语义。 */
+  let stagedFrames: ConversationTopicFrame[] = [];
 
   return {
     calls,
@@ -289,6 +304,14 @@ export function createFakeTransport(): FakeTransport {
     setCommandAck(status) {
       commandAckStatus = status;
     },
+    /**
+     * 模拟"首帧先于订阅 ACK 到达":帧进暂存,等 store 在 ownership 就位后调
+     * activate 才回放(对应真实链路 barrier 的 begin→bind→activate 暂存回放;
+     * 修复前 activate 发生在 ownership 写入之前,回放帧会被 applyFrame 丢弃)。
+     */
+    pushBeforeAck(frame) {
+      stagedFrames.push(frame);
+    },
     async subscribeSession(sessionId) {
       return {
         subscriptionId: `sub-${sessionId}`,
@@ -296,6 +319,14 @@ export function createFakeTransport(): FakeTransport {
         mode: "snapshot" as const,
         logEpoch: "epoch-1",
       };
+    },
+    activate(subscriptionId) {
+      calls.activate += 1;
+      const replay = stagedFrames.filter((frame) => frame.subscriptionId === subscriptionId);
+      stagedFrames = stagedFrames.filter((frame) => frame.subscriptionId !== subscriptionId);
+      for (const frame of replay) {
+        for (const listener of frameListeners) listener(frame, "initial");
+      }
     },
     async resync(_subscription, base) {
       calls.resync += 1;
@@ -313,6 +344,12 @@ export function createFakeTransport(): FakeTransport {
     },
     responds,
     stops,
+    cancels,
+    snoozes,
+    queueCalls,
+    setCasAcks(next) {
+      casAcks = next;
+    },
     async resolveInteraction(_sessionId, interactionId, answer) {
       responds.push({ interactionId, answer });
       return { status: commandAckStatus } as never;
@@ -320,6 +357,22 @@ export function createFakeTransport(): FakeTransport {
     async stop(_sessionId, expectedForegroundExecutionId) {
       stops.push(expectedForegroundExecutionId);
       return { status: commandAckStatus } as never;
+    },
+    async cancelBackgroundWork(_sessionId, workId) {
+      cancels.push(workId);
+      return { status: commandAckStatus } as never;
+    },
+    async snoozeInteraction(_sessionId, interactionId) {
+      snoozes.push(interactionId);
+      return { status: "accepted" } as never;
+    },
+    async sendQueuedNow(_sessionId, queueItemId, baseRevision) {
+      queueCalls.push({ type: "sendQueuedNow", queueItemId, baseRevision });
+      return (casAcks.shift() ?? { status: commandAckStatus }) as never;
+    },
+    async removeQueuedItem(_sessionId, queueItemId, baseRevision) {
+      queueCalls.push({ type: "deleteQueueItem", queueItemId, baseRevision });
+      return (casAcks.shift() ?? { status: commandAckStatus }) as never;
     },
     onFrame(listener) {
       frameListeners.add(listener);

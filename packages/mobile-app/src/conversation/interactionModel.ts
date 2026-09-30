@@ -36,6 +36,34 @@ export interface QuestionModel {
   options: QuestionOptionModel[];
 }
 
+/**
+ * 自动结束(倒计时)状态:AskUserQuestion 这类交互会在倒计时结束时由服务端自动处理。
+ * `hiddenGrace` 表示宽限期还没到可见时刻,`visibleCountdown` 才会展示倒计时,
+ * `snoozed` 表示用户已经动过手(倒计时已暂停)。
+ */
+export type AutoResolutionView =
+  | { mode: "none" }
+  | { mode: "hidden"; visibleInMs: number }
+  | { mode: "countdown"; remainingMs: number }
+  | { mode: "snoozed" };
+
+export function describeAutoResolution(
+  autoResolution: PendingInteraction["autoResolution"] | undefined,
+  nowMs: number,
+): AutoResolutionView {
+  if (!autoResolution) return { mode: "none" };
+  if (autoResolution.state === "snoozed") return { mode: "snoozed" };
+  if (nowMs < autoResolution.visibleAt) {
+    return { mode: "hidden", visibleInMs: Math.max(0, autoResolution.visibleAt - nowMs) };
+  }
+  return { mode: "countdown", remainingMs: Math.max(0, autoResolution.deadlineAt - nowMs) };
+}
+
+/** 倒计时文案:剩余不足 1 秒也显示 1 秒,避免出现"还剩 0 秒"。 */
+export function describeCountdown(remainingMs: number): string {
+  return `还剩 ${Math.max(1, Math.ceil(remainingMs / 1000))} 秒自动处理`;
+}
+
 export type InteractionCardModel =
   | {
       kind: "permission";
@@ -45,6 +73,7 @@ export type InteractionCardModel =
       detailText: string;
       options: Array<{ optionId: string; label: string; kind: string }>;
       freeText: boolean;
+      autoResolution?: PendingInteraction["autoResolution"];
     }
   | {
       kind: "plan";
@@ -52,6 +81,7 @@ export type InteractionCardModel =
       prompt: string;
       /** 计划反馈输入框(拒绝时可带反馈)。 */
       feedback: boolean;
+      autoResolution?: PendingInteraction["autoResolution"];
     }
   | {
       kind: "question";
@@ -62,6 +92,7 @@ export type InteractionCardModel =
       options: Array<{ optionId: string; label: string }>;
       freeText: boolean;
       sensitive: boolean;
+      autoResolution?: PendingInteraction["autoResolution"];
     }
   | { kind: "unsupported"; interactionId: string; reason: "workspace_hook_review" | "unknown" };
 
@@ -85,10 +116,12 @@ function truncate(text: string): string {
 
 export function buildInteractionCard(interaction: PendingInteraction): InteractionCardModel {
   const { payload } = interaction;
+  const autoResolution = interaction.autoResolution;
   if (payload.kind === "workspaceHookReview") {
     // 手机未声明 workspaceHookReviewUi:不渲染,但也不能因此阻塞其它交互。
     return { kind: "unsupported", interactionId: interaction.interactionId, reason: "workspace_hook_review" };
   }
+  const autoResolutionField = autoResolution ? { autoResolution } : {};
   if (payload.kind === "permission") {
     return {
       kind: "permission",
@@ -103,6 +136,7 @@ export function buildInteractionCard(interaction: PendingInteraction): Interacti
         kind: option.kind,
       })),
       freeText: payload.freeText === true,
+      ...autoResolutionField,
     };
   }
   if (isPlanApprovalInteraction(interaction)) {
@@ -111,6 +145,7 @@ export function buildInteractionCard(interaction: PendingInteraction): Interacti
       interactionId: interaction.interactionId,
       prompt: payload.prompt,
       feedback: true,
+      ...autoResolutionField,
     };
   }
   const questions = payload.questions ?? [];
@@ -134,6 +169,7 @@ export function buildInteractionCard(interaction: PendingInteraction): Interacti
     })),
     freeText: payload.freeText,
     sensitive: payload.sensitive === true,
+    ...autoResolutionField,
   };
 }
 

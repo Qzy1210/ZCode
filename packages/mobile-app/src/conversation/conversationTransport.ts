@@ -9,7 +9,6 @@
  * 不让上一条会话的残留分片污染下一次订阅。
  */
 import type { RemoteServiceAccess } from "@zcode/client";
-import { uuidv7 } from "@zcode/shared";
 import {
   TopicWireFrameAssembler,
   conversationTopicFrameSchema,
@@ -26,14 +25,17 @@ import {
  * 避免 App 自己声明一份可能漂移的类型。
  */
 export type InteractionAnswer = CommandPayloadMap["resolveInteraction"]["answer"];
-import {
-  createAckActivationBarrier,
-  createTopicWireDecoder,
-  ensureAgentV4ClientHandshake,
-} from "@zcode/shared/v4-client";
+import { createAckActivationBarrier, createTopicWireDecoder } from "@zcode/shared/v4-client";
+import { createAgentCommandClient, MOBILE_APP_VERSION } from "./agentCommandClient";
 
-/** 与 app.json 的 version 保持一致;仅用于握手元数据。 */
-export const MOBILE_APP_VERSION = "0.1.0";
+export { MOBILE_APP_VERSION };
+
+/** 草稿级发送选项(随本次输入提交,与桌面 composer 语义一致)。 */
+export interface SendTextOptions {
+  modelSelection?: CommandPayloadMap["sendText"]["modelSelection"];
+  mode?: CommandPayloadMap["sendText"]["mode"];
+  planEnabled?: boolean;
+}
 
 export interface ConversationWorkspaceTarget {
   workspacePath: string;
@@ -62,23 +64,51 @@ export interface ConversationTransport {
   resync(subscription: ConversationSubscription, base: { logEpoch: string; seq: number } | null): Promise<void>;
   unsubscribe(subscription: ConversationSubscription): Promise<void>;
   loadOlder(sessionId: string, beforeRowId: number, limit: number): Promise<OlderRowsPage>;
-  sendText(sessionId: string, text: string): Promise<CommandAck>;
+  /**
+   * 发送文本。options 是"本次输入"的草稿级选择(模型/模式/计划开关),
+   * 与桌面 composer 语义一致:只影响这一条输入,不立即改会话级配置。
+   */
+  sendText(
+    sessionId: string,
+    text: string,
+    options?: SendTextOptions,
+  ): Promise<CommandAck>;
   /** 审批/问答/计划批准的应答;answer 形状由 interactionModel 构造。 */
   resolveInteraction(sessionId: string, interactionId: string, answer: InteractionAnswer): Promise<CommandAck>;
   /** 中断当前 turn;expectedForegroundExecutionId 取自 control.activeWorks。 */
   stop(sessionId: string, expectedForegroundExecutionId?: string): Promise<CommandAck>;
+  /** 取消后台工作(长跑 bash/子代理/工作流)。 */
+  cancelBackgroundWork(sessionId: string, workId: string): Promise<CommandAck>;
+  /** 暂停交互的自动结束倒计时(用户开始作答时调用,幂等)。 */
+  snoozeInteraction(sessionId: string, interactionId: string): Promise<CommandAck>;
+  /** 队列:立即发送 / 删除(CAS 命令,需 baseRevision)。 */
+  sendQueuedNow(sessionId: string, queueItemId: string, baseRevision: number): Promise<CommandAck>;
+  removeQueuedItem(sessionId: string, queueItemId: string, baseRevision: number): Promise<CommandAck>;
   onFrame(
     listener: (frame: ConversationTopicFrame, deliveryKind: TopicFrameDeliveryKind) => void,
   ): void;
   onSyncIssue(listener: (issue: { code: string; message: string }) => void): void;
+  /**
+   * 释放 barrier 暂存的订阅首帧。必须由 store 在写入 ownership(subscription 赋值)
+   * **之后**调用:首帧可能先于订阅 RPC 响应到达,barrier 暂存并在 activate 时同步回放,
+   * 若 ownership 尚未就位,回放帧会被 applyFrame 的 subscriptionId 检查丢弃,
+   * 界面停在"正在加载会话…"直到下一次 resync(桌面 store 同序,见其注释)。
+   */
+  activate(subscriptionId: string): void;
   dispose(): void;
 }
 
 export function createConversationTransport(params: {
   services: RemoteServiceAccess;
   target: ConversationWorkspaceTarget;
+  /**
+   * 连接级稳定 clientId(由 connectionRuntime 下发)。
+   * 不能用每实例新生成的值:桌面 facade 在握手时绑定它,之后命令信封必须一致,
+   * 否则第二个会话屏实例的命令会被拒(clientMismatch,表现为点了没反应)。
+   */
+  clientId: string;
 }): ConversationTransport {
-  const { services, target } = params;
+  const { services, target, clientId } = params;
   const agent = services.zcodeAgentService;
   const workspace = {
     workspacePath: target.workspacePath,
@@ -88,8 +118,6 @@ export function createConversationTransport(params: {
     (frame: ConversationTopicFrame, deliveryKind: TopicFrameDeliveryKind) => void
   >();
   const issueListeners = new Set<(issue: { code: string; message: string }) => void>();
-  // 连接级稳定 clientId:命令信封必须复用同一值,否则桌面 facade 报 clientMismatch。
-  const clientId = `client-${uuidv7()}`;
   let disposed = false;
 
   const decoder = createTopicWireDecoder(
@@ -114,34 +142,12 @@ export function createConversationTransport(params: {
     barrier.accept(wire);
   });
 
-  /** 所有命令共用同一个信封工厂:clientId 必须与握手绑定值一致,否则桌面报 clientMismatch。 */
-  function sendCommand(
-    command: { type: "sendText"; payload: unknown } | { type: "resolveInteraction"; payload: unknown } | { type: "stop"; payload: unknown },
-    sessionId: string,
-  ): Promise<CommandAck> {
-    return agent.sendConversationCommandV4({
-      ...workspace,
-      envelope: {
-        commandId: uuidv7(),
-        clientId,
-        sessionId,
-        type: command.type,
-        payload: command.payload,
-        issuedAt: Date.now(),
-      },
-    });
-  }
+  // 握手与信封统一走命令客户端:clientId 必须与握手绑定值一致,否则桌面报 clientMismatch。
+  const commands = createAgentCommandClient({ services, clientId, workspace: target });
 
   return {
     async subscribeSession(sessionId, options) {
-      // 握手对象必须是稳定引用:共享实现按 service 身份缓存握手 Promise。
-      await ensureAgentV4ClientHandshake(agent, {
-        clientId,
-        clientKind: "mobileApp",
-        appVersion: MOBILE_APP_VERSION,
-        // App 无 hook review UI,故不声明 workspaceHookReviewUi;
-        // workflowRunDeltas 由共享实现按"Host 先声明"的单向规则决定。
-      });
+      await commands.ensureReady();
       const topic = `conversation/${sessionId}`;
       const pending = barrier.begin(topic);
       try {
@@ -152,8 +158,8 @@ export function createConversationTransport(params: {
           visibility: "foreground",
         });
         barrier.bind(pending, result.ack.subscriptionId);
-        // ownership 生效:回放 ACK 之前到达的首帧(通常是 snapshot)。
-        barrier.activate(result.ack.subscriptionId);
+        // 不在这里 activate:暂存帧的回放必须等 store 写入 ownership 之后
+        // (见接口注释);ACK 先到时帧直接经 accept→active 路径投递,不受影响。
         return {
           subscriptionId: result.ack.subscriptionId,
           topic,
@@ -163,6 +169,13 @@ export function createConversationTransport(params: {
       } catch (error) {
         barrier.cancel(pending);
         throw error;
+      }
+    },
+    activate(subscriptionId) {
+      const activation = barrier.activate(subscriptionId);
+      // 同 topic 的旧订阅已被 unsubscribe 丢弃;防御性清理迟到残留,避免装配器串流。
+      if (activation?.previousSubscriptionId) {
+        decoder.discard(activation.topic, activation.previousSubscriptionId);
       }
     },
     async resync(subscription, base) {
@@ -192,20 +205,30 @@ export function createConversationTransport(params: {
       });
       return { rows: result.rows, hasMore: result.hasMore, atLogEpoch: result.atLogEpoch };
     },
-    async sendText(sessionId, text) {
-      return sendCommand({ type: "sendText", payload: { text } }, sessionId);
+    async sendText(sessionId, text, options) {
+      return commands.send("sendText", { text, ...options }, sessionId);
     },
     async resolveInteraction(sessionId, interactionId, answer) {
-      return sendCommand({ type: "resolveInteraction", payload: { interactionId, answer } }, sessionId);
+      return commands.send("resolveInteraction", { interactionId, answer }, sessionId);
     },
     async stop(sessionId, expectedForegroundExecutionId) {
-      return sendCommand(
-        {
-          type: "stop",
-          payload: expectedForegroundExecutionId ? { expectedForegroundExecutionId } : {},
-        },
+      return commands.send(
+        "stop",
+        expectedForegroundExecutionId ? { expectedForegroundExecutionId } : {},
         sessionId,
       );
+    },
+    async cancelBackgroundWork(sessionId, workId) {
+      return commands.send("cancelBackgroundWork", { workId }, sessionId);
+    },
+    async snoozeInteraction(sessionId, interactionId) {
+      return commands.send("snoozeInteractionAutoResolution", { interactionId }, sessionId);
+    },
+    async sendQueuedNow(sessionId, queueItemId, baseRevision) {
+      return commands.send("sendQueuedNow", { queueItemId }, sessionId, { baseRevision });
+    },
+    async removeQueuedItem(sessionId, queueItemId, baseRevision) {
+      return commands.send("deleteQueueItem", { queueItemId }, sessionId, { baseRevision });
     },
     onFrame(listener) {
       frameListeners.add(listener);

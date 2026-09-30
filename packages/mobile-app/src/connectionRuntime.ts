@@ -14,6 +14,7 @@
  * 本文件只做状态机与所有权收口。不依赖 React,便于脚本驱动验证。
  */
 import type { RemoteServiceAccess } from "@zcode/client";
+import { uuidv7 } from "@zcode/shared";
 
 import {
   clearDeviceCredential,
@@ -60,6 +61,8 @@ export type ConnectionRuntimeState =
       services: RemoteServiceAccess;
       mode: "pairing" | "device";
       generation: number;
+      /** 连接级稳定 clientId:命令信封与握手都必须用它。 */
+      clientId: string;
       /** 非空表示正在重连(界面加横条 + 禁用写入)。 */
       banner: ConnectionBanner | null;
     };
@@ -83,6 +86,8 @@ export interface ConnectionRuntimeDeps {
 export interface ConnectionRuntime {
   subscribe(listener: () => void): () => void;
   getState(): ConnectionRuntimeState;
+  /** 连接级 clientId(握手与命令信封共用);连接尚未建立时也可读。 */
+  getClientId(): string;
   start(): void;
   connectWithQr(qr: PairingQrPayload): Promise<void>;
   retryFromError(): void;
@@ -111,6 +116,14 @@ export function createConnectionRuntime(deps: ConnectionRuntimeDeps = {}): Conne
     clear: clearDeviceCredential,
   };
 
+
+  /**
+   * 连接级稳定的 v4 clientId:桌面 facade 在握手时把它绑定到该 attachment,
+   * 之后所有命令信封必须复用同一个值。此前由每个 conversationTransport 实例各自
+   * 生成,导致"返回列表再进会话"时新实例带未绑定的 clientId,命令被以
+   * fault.command.clientMismatch 拒绝(表现为点了没反应)。
+   */
+  const clientId = `client-${uuidv7()}`;
 
   const listeners = new Set<() => void>();
   let state: ConnectionRuntimeState = INITIAL_STATE;
@@ -197,6 +210,7 @@ export function createConnectionRuntime(deps: ConnectionRuntimeDeps = {}): Conne
       services: lastReady.services,
       mode: lastReady.mode,
       generation: lastReady.generation,
+      clientId,
       banner: {
         attempt,
         reason,
@@ -237,7 +251,7 @@ export function createConnectionRuntime(deps: ConnectionRuntimeDeps = {}): Conne
     generation += 1;
     reconnectAttempt = 0;
     lastReady = { services, mode, generation };
-    emit({ kind: "ready", services, mode, generation, banner: null });
+    emit({ kind: "ready", services, mode, generation, clientId, banner: null });
   }
 
   async function handleConnectionLost(event: {
@@ -361,6 +375,9 @@ export function createConnectionRuntime(deps: ConnectionRuntimeDeps = {}): Conne
     },
     getState() {
       return state;
+    },
+    getClientId() {
+      return clientId;
     },
     start() {
       void (async () => {

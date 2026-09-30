@@ -11,13 +11,9 @@
  */
 import type { RemoteServiceAccess } from "@zcode/client";
 import type {
-  CommandAck,
   ConversationRow,
   ConversationSnapshot,
   ConversationTopicFrame,
-  PendingInteraction,
-  PlanState,
-  SessionControl,
 } from "@zcode/shared/zcode-protocol-v4";
 import { applyConversationDeltas } from "@zcode/shared/zcode-protocol-v4";
 import { resolveStopAvailability } from "./interactionModel";
@@ -26,73 +22,26 @@ import {
   type ConversationSubscription,
   type ConversationTransport,
   type ConversationWorkspaceTarget,
-  type InteractionAnswer,
 } from "./conversationTransport";
+import { createSessionCommands } from "./sessionCommands";
+import {
+  EMPTY_VIEW,
+  type CommandActionState,
+  type ConversationSendState,
+  type ConversationStatus,
+  type ConversationStore,
+  type ConversationView,
+} from "./conversationView";
+
+export type {
+  CommandActionState,
+  ConversationSendState,
+  ConversationStatus,
+  ConversationStore,
+  ConversationView,
+} from "./conversationView";
 const OLDER_PAGE_LIMIT = 60;
 const NOTIFY_COALESCE_MS = 100;
-
-export type ConversationStatus = "loading" | "ready" | "error";
-
-export interface ConversationSendState {
-  state: "idle" | "sending" | "rejected";
-  message?: string;
-}
-
-/** 交互应答/中断的操作态:sending 期间禁用按钮,rejected 时把原因显示出来。 */
-export interface CommandActionState {
-  state: "idle" | "sending" | "rejected";
-  message?: string;
-  /** respond 专用:正在应答/刚被拒的交互 id。 */
-  interactionId?: string;
-}
-
-export interface ConversationView {
-  status: ConversationStatus;
-  rows: ConversationRow[];
-  /** 是否还有更早的行(由 window 首行 vs 全序首行判定,而非本地猜测)。 */
-  atTop: boolean;
-  loadingOlder: boolean;
-  /** 存在流式行(正文/思考/工具进行中)时用于显示"生成中"指示。 */
-  streaming: boolean;
-  send: ConversationSendState;
-  /** 待回答的交互(审批/问答/计划批准);渲染与选择规则见 interactionModel。 */
-  pending: readonly PendingInteraction[];
-  /** 会话控制面:canStop/phase 等,用于中断按钮。 */
-  control: SessionControl | null;
-  /** 计划进度(TodoWrite 投影),只读展示。 */
-  plan: PlanState | null;
-  response: CommandActionState;
-  stop: CommandActionState;
-  error?: { code: string; message: string };
-}
-
-export interface ConversationStore {
-  subscribe(listener: () => void): () => void;
-  getSnapshot(): ConversationView;
-  loadOlder(): Promise<void>;
-  send(text: string): Promise<ConversationSendState>;
-  /** 回答审批/问答/计划批准;answer 由 interactionModel 构造。 */
-  respond(interactionId: string, answer: InteractionAnswer): Promise<CommandActionState>;
-  /** 中断当前 turn(桌面语义:保留队列,暂停自动排空)。 */
-  stopTurn(): Promise<CommandActionState>;
-  /** 手动重试:按当前订阅强制回快照,用于错误态恢复。 */
-  retry(): Promise<void>;
-  dispose(): void;
-}
-
-const EMPTY_VIEW: ConversationView = {
-  status: "loading",
-  rows: [],
-  atTop: true,
-  loadingOlder: false,
-  streaming: false,
-  send: { state: "idle" },
-  pending: [],
-  control: null,
-  plan: null,
-  response: { state: "idle" },
-  stop: { state: "idle" },
-};
 
 function isStreamingRow(row: ConversationRow): boolean {
   if (row.kind === "assistantText" || row.kind === "reasoning") return row.state === "streaming";
@@ -103,11 +52,6 @@ function isStreamingRow(row: ConversationRow): boolean {
   }
   if (row.kind === "subagent") return row.status === "running";
   return false;
-}
-
-/** 命令被接受/幂等重复/无操作都算成功;stale/rejected/failed 才需要提示用户。 */
-function isCommandAccepted(ack: CommandAck): boolean {
-  return ack.status === "accepted" || ack.status === "duplicate" || ack.status === "noop";
 }
 
 function describeError(error: unknown): { code: string; message: string } {
@@ -122,12 +66,36 @@ export function createConversationStore(params: {
   services: RemoteServiceAccess;
   target: ConversationWorkspaceTarget;
   sessionId: string;
-  /** 测试注入:提供后不再自建 transport(见 scripts/verify-conversation-store.ts)。 */
+  /** 连接级 clientId(见 conversationTransport 注释);测试注入 transport 时可省略。 */
+  clientId?: string;
+  /** 测试注入:提供后不再自建 transport(见 scripts/verify-store.ts)。 */
   transport?: ConversationTransport;
 }): ConversationStore {
-  const { services, target, sessionId } = params;
+  const { services, target, sessionId, clientId } = params;
   const transport: ConversationTransport =
-    params.transport ?? createConversationTransport({ services, target });
+    params.transport ??
+    createConversationTransport({
+      services,
+      target,
+      clientId: clientId ?? "",
+    });
+  /** 操作态写回:命令层只上报状态,视图与通知由 store 负责。 */
+  function setAction(slot: "send" | "response" | "stop", next: CommandActionState): void {
+    if (disposed) return;
+    if (slot === "send") send = next;
+    else if (slot === "response") response = next;
+    else stop = next;
+    notifyImmediate();
+  }
+
+  const commands = createSessionCommands({
+    transport,
+    sessionId,
+    getRevision: () => snapshot?.revision ?? 0,
+    isDisposed: () => disposed,
+    setAction,
+  });
+
   const listeners = new Set<() => void>();
 
   let disposed = false;
@@ -159,6 +127,19 @@ export function createConversationStore(params: {
       pending: snapshot?.pendingInteractions ?? [],
       control: snapshot?.control ?? null,
       plan: snapshot?.plan ?? null,
+      config: snapshot?.config ?? null,
+      usage: snapshot?.usage ?? null,
+      backgroundWorks: snapshot?.backgroundWorks ?? [],
+      workflowRuns: snapshot?.workflowRuns?.runs ?? [],
+      queue: snapshot?.queue ?? null,
+      availability: snapshot
+        ? {
+            ...(snapshot.availability.queueEdit ? { queueEdit: snapshot.availability.queueEdit } : {}),
+            ...(snapshot.availability.sendQueuedNow
+              ? { sendQueuedNow: snapshot.availability.sendQueuedNow }
+              : {}),
+          }
+        : null,
       response,
       stop,
       ...(error ? { error } : {}),
@@ -212,7 +193,7 @@ export function createConversationStore(params: {
         const next = await transport.subscribeSession(sessionId, {
           base: { logEpoch: subscription.logEpoch, seq: 0 },
         });
-        subscription = next;
+        adoptSubscription(next);
         error = undefined;
         status = snapshot ? "ready" : "loading";
         notifyImmediate();
@@ -223,6 +204,12 @@ export function createConversationStore(params: {
     } finally {
       resyncing = false;
     }
+  }
+
+  /** 订阅落地:ownership 先写,再释放 barrier 暂存的首帧(见 activate 注释)。 */
+  function adoptSubscription(next: ConversationSubscription): void {
+    subscription = next;
+    transport.activate(next.subscriptionId);
   }
 
   function applyFrame(
@@ -282,7 +269,7 @@ export function createConversationStore(params: {
         void transport.unsubscribe(next).catch(() => {});
         return;
       }
-      subscription = next;
+      adoptSubscription(next);
     })
     .catch((subscribeError) => {
       if (disposed) return;
@@ -331,69 +318,28 @@ export function createConversationStore(params: {
         notifyImmediate();
       }
     },
-    async send(text) {
-      const trimmed = text.trim();
-      if (disposed || trimmed.length === 0) return send;
-      send = { state: "sending" };
-      notifyImmediate();
-      try {
-        const ack: CommandAck = await transport.sendText(sessionId, trimmed);
-        if (disposed) return send;
-        if (isCommandAccepted(ack)) {
-          send = { state: "idle" };
-        } else {
-          send = {
-            state: "rejected",
-            message: ack.message ?? ack.reasonCode ?? `发送被拒绝(${ack.status})`,
-          };
-        }
-      } catch (sendError) {
-        send = { state: "rejected", message: describeError(sendError).message };
-      }
-      notifyImmediate();
-      return send;
+    send(text, options) {
+      const result = commands.send(text, options);
+      return result;
     },
-    async respond(interactionId, answer) {
-      if (disposed) return response;
-      response = { state: "sending", interactionId };
-      notifyImmediate();
-      try {
-        const ack = await transport.resolveInteraction(sessionId, interactionId, answer);
-        if (disposed) return response;
-        if (isCommandAccepted(ack)) {
-          response = { state: "idle" };
-        } else {
-          response = {
-            state: "rejected",
-            interactionId,
-            message: ack.message ?? ack.reasonCode ?? `应答被拒绝(${ack.status})`,
-          };
-        }
-      } catch (respondError) {
-        response = { state: "rejected", interactionId, message: describeError(respondError).message };
-      }
-      notifyImmediate();
-      return response;
+    respond(interactionId, answer) {
+      return commands.respond(interactionId, answer);
     },
-    async stopTurn() {
-      if (disposed) return stop;
-      stop = { state: "sending" };
-      notifyImmediate();
-      try {
-        const availability = resolveStopAvailability(snapshot?.control ?? null);
-        const ack = await transport.stop(
-          sessionId,
-          availability.foregroundExecutionId,
-        );
-        if (disposed) return stop;
-        stop = isCommandAccepted(ack)
-          ? { state: "idle" }
-          : { state: "rejected", message: ack.message ?? ack.reasonCode ?? `中断被拒绝(${ack.status})` };
-      } catch (stopError) {
-        stop = { state: "rejected", message: describeError(stopError).message };
-      }
-      notifyImmediate();
-      return stop;
+    stopTurn() {
+      return commands.stopTurn(resolveStopAvailability(snapshot?.control ?? null).foregroundExecutionId);
+    },
+    cancelBackgroundWork(workId) {
+      return commands.cancelBackgroundWork(workId);
+    },
+    async snoozeInteraction(interactionId) {
+      // 幂等且非关键路径:失败不打扰用户(与服务端 first-writer-wins 语义一致)。
+      await transport.snoozeInteraction(sessionId, interactionId).catch(() => undefined);
+    },
+    promoteQueuedItem(queueItemId) {
+      return commands.promoteQueuedItem(queueItemId);
+    },
+    removeQueuedItem(queueItemId) {
+      return commands.removeQueuedItem(queueItemId);
     },
     async retry() {
       if (disposed) return;
