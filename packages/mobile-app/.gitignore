@@ -4,3 +4,4 @@
 # Expo / Metro 产物
 .expo/
 dist/
+.venv-ocr/
