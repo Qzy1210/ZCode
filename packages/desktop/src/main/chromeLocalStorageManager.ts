@@ -1,8 +1,9 @@
 /* eslint-disable max-lines -- Chrome helper、CDP 传输和 Electron 目标写入必须共享同一套敏感数据边界。 */
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { cp, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep as pathSeparator } from "node:path";
+import type { Readable } from "node:stream";
 import { BrowserWindow } from "electron";
 import type { Session, WebContents } from "electron";
 import type { ChromeBrowserDataImportError } from "@zcode/shared";
@@ -328,7 +329,14 @@ async function navigateToStorageOrigin(transport: CdpTransport, origin: string):
   }
 }
 
-async function waitForChromeDebuggerUrl(child: ChildProcessWithoutNullStreams): Promise<string> {
+/**
+ * Chrome helper 进程:spawn 时 stdin 是 "ignore",所以返回的是 ByStdio<null, …>,
+ * 不是 ChildProcessWithoutNullStreams(它要求 stdin 可写)。两个 helper 只用到
+ * stderr/exitCode/kill,按实际类型标注即可。
+ */
+type ChromeHelperProcess = ChildProcessByStdio<null, Readable, Readable>;
+
+async function waitForChromeDebuggerUrl(child: ChromeHelperProcess): Promise<string> {
   return withTimeout(
     new Promise<string>((resolve, reject) => {
       let stderr = "";
@@ -379,7 +387,7 @@ async function findChromePageTarget(browserDebuggerUrl: string): Promise<string>
   throw new Error("chrome_helper_page_missing");
 }
 
-async function stopChromeHelper(child: ChildProcessWithoutNullStreams): Promise<void> {
+async function stopChromeHelper(child: ChromeHelperProcess): Promise<void> {
   if (child.exitCode !== null) return;
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   child.kill();

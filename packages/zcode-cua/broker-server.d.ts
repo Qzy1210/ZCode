@@ -31,9 +31,21 @@ export interface CuaHelperVerifierDependencies {
   [key: string]: unknown;
 }
 
+/**
+ * 安装器日志契约:第一个参数是 traceId,其余是消息参数。
+ * 消费方(desktop main 的 toInstallerLogger)按这个形状包装,声明成 unknown
+ * 会让包装层拿不到上下文类型(参数隐式 any)。
+ */
+export interface CuaHelperInstallerLogger {
+  debug?: (traceId: string, ...args: unknown[]) => void;
+  info?: (traceId: string, ...args: unknown[]) => void;
+  warn?: (traceId: string, ...args: unknown[]) => void;
+  error?: (traceId: string, ...args: unknown[]) => void;
+}
+
 export interface CuaHelperInstallerOptions {
   env?: NodeJS.ProcessEnv;
-  logger?: unknown;
+  logger?: CuaHelperInstallerLogger;
   bundledAppPath?: string;
   plan?: unknown;
   dependencies?: Partial<CuaHelperVerifierDependencies>;

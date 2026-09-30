@@ -104,8 +104,11 @@ interface ScrollAlignment {
   inline: "center" | "end" | "nearest" | "start";
 }
 
+/** force 路径与取模回退共用同一个对齐值,避免下标访问返回 undefined。 */
+const DEFAULT_POINTER_SCROLL_ALIGNMENT: ScrollAlignment = { block: "center", inline: "center" };
+
 const POINTER_SCROLL_ALIGNMENTS: readonly ScrollAlignment[] = [
-  { block: "center", inline: "center" },
+  DEFAULT_POINTER_SCROLL_ALIGNMENT,
   { block: "end", inline: "end" },
   { block: "start", inline: "start" },
   { block: "nearest", inline: "nearest" },
@@ -318,8 +321,10 @@ class IabPlaywrightLocatorSession {
             needsStable: needsPointer,
             scrollAlignment:
               action.force === true
-                ? POINTER_SCROLL_ALIGNMENTS[0]
-                : POINTER_SCROLL_ALIGNMENTS[pointerAttempt % POINTER_SCROLL_ALIGNMENTS.length],
+                ? DEFAULT_POINTER_SCROLL_ALIGNMENT
+                : (POINTER_SCROLL_ALIGNMENTS[
+                    pointerAttempt % POINTER_SCROLL_ALIGNMENTS.length
+                  ] ?? DEFAULT_POINTER_SCROLL_ALIGNMENT),
           },
           remaining,
         );

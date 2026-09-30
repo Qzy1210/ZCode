@@ -74,6 +74,9 @@ async function buildApplicationPathIndex(
   const worker = async () => {
     while (cursor < appPaths.length) {
       const appPath = appPaths[cursor++];
+      // noUncheckedIndexedAccess 下取数组元素是 string | undefined;while 条件已保证
+      // 下标有效,这里只是把这个事实写给类型系统(同时挡住未来改成并发取下标后的越界)。
+      if (appPath === undefined) continue;
       const remainingMs = deadline - dependencies.now();
       if (remainingMs <= 0) return;
       try {
