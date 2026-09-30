@@ -20,6 +20,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { Readable, Transform } from "node:stream";
+import type { ReadableStream as NodeWebReadableStream } from "node:stream/web";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileExists } from "@zcode/server/remote/deployShared.js";
@@ -1645,7 +1646,9 @@ async function writeResponseBodyToFile(
     },
   });
 
-  await pipeline(Readable.fromWeb(response.body as globalThis.ReadableStream), byteMeter, output);
+  // 显式指向 node:stream/web 的 ReadableStream:桌面 main 工程的 lib 集里
+  // globalThis.ReadableStream 会解析成另一份声明,造成同一运行时类型被判不兼容。
+  await pipeline(Readable.fromWeb(response.body as NodeWebReadableStream), byteMeter, output);
   reportProgress(transferredBytes, true);
 }
 

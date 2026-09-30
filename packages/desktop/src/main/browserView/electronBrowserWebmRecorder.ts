@@ -381,7 +381,13 @@ export async function createElectronBrowserWebmRecorder(
       `[browser-recording] recorder console level=${details.level ?? "unknown"} message=${details.message ?? ""}`,
     );
   };
-  recorderWindow.webContents.on("console-message", onConsoleMessage);
+  // 当前 Electron 的 WebContents 类型里已没有 console-message(仅诊断日志,不在录制关键路径)。
+  // 运行时行为保持原样:仍按事件名注册;类型层面用最小结构面承接,不把整段录制逻辑卡在编译上。
+  const consoleMessageSource = recorderWindow.webContents as unknown as {
+    on(event: "console-message", listener: typeof onConsoleMessage): void;
+    removeListener(event: "console-message", listener: typeof onConsoleMessage): void;
+  };
+  consoleMessageSource.on("console-message", onConsoleMessage);
 
   const cleanup = async (cancel: boolean): Promise<void> => {
     if (closed) return;
@@ -402,7 +408,7 @@ export async function createElectronBrowserWebmRecorder(
     closePort(rendererPort);
     clearDisplayMediaHandler(recorderSession);
     recorderWindow.webContents.removeListener("render-process-gone", onRendererGone);
-    recorderWindow.webContents.removeListener("console-message", onConsoleMessage);
+    consoleMessageSource.removeListener("console-message", onConsoleMessage);
     closeWindow(recorderWindow);
     await rm(recorderDocumentPath, { force: true }).catch(() => undefined);
   };

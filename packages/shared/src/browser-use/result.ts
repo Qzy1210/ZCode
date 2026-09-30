@@ -19,7 +19,9 @@ export const browserTabSummarySchema = z
      * 先绑定并读取当前页面，而不是误读 session 默认 tab。
      */
     active: z.boolean().optional(),
-    lifecycle: z.enum(["active", "deliverable", "handoff"]).optional(),
+    // "closed" 与下方的用户 tab / 恢复记录同源:tab 关闭后 main 仍可能回一帧摘要,
+    // summary() 会把该状态原样发出,枚举必须收下它。
+    lifecycle: z.enum(["active", "deliverable", "handoff", "closed"]).optional(),
   })
   .strict();
 export type BrowserTabSummary = z.infer<typeof browserTabSummarySchema>;

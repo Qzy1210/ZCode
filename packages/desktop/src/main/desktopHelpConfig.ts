@@ -11,7 +11,10 @@ export function createDesktopHelpConfigReader(options: {
   appVersion: string;
   deviceMid: string;
 }) {
-  const read = createHelpAppConfigReader({ fetchImpl: (input, init) => net.fetch(input, init) });
+  // electron net.fetch 只收 string | Request,URL 实例要先归一成字符串(语义不变)。
+  const read = createHelpAppConfigReader({
+    fetchImpl: (input, init) => net.fetch(input instanceof URL ? input.toString() : input, init),
+  });
   return async () => {
     const endpointOrigin = await options.resolveEndpointOrigin();
     return read(

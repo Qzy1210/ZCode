@@ -45,12 +45,16 @@ interface RemoteUsageArmsTelemetryConfig {
   sendCustom: (payload: FinalArmsCustomEventPayload) => void;
   e2eController?: FinalArmsCustomEventE2EController | null;
   logger: { warn: (...args: unknown[]) => void };
-  setInterval?: (callback: () => void, delayMs: number) => ReturnType<typeof setInterval>;
-  clearInterval?: (timer: ReturnType<typeof setInterval>) => void;
+  // 注入的计时器实现可能来自浏览器型 setInterval(返回 number),与 node 的 Timeout 并存,
+  // 这两个签名和下面的 periodicTimer 必须收同一种联合,否则赋值/清理两侧都对不上。
+  setInterval?: (callback: () => void, delayMs: number) => IntervalTimer;
+  clearInterval?: (timer: IntervalTimer) => void;
 }
 
+type IntervalTimer = ReturnType<typeof setInterval> | number;
+
 let telemetryConfig: RemoteUsageArmsTelemetryConfig | null = null;
-let periodicTimer: ReturnType<typeof setInterval> | null = null;
+let periodicTimer: IntervalTimer | null = null;
 let lastGaugeRendererId: number | null = null;
 
 function buildRemoteConnectResultArmsPayload(params: {
@@ -114,8 +118,10 @@ export function configureRemoteUsageArmsTelemetry(config: RemoteUsageArmsTelemet
   stopRemoteUsageArmsPeriodicSampling();
   telemetryConfig = config;
   const schedule = config.setInterval ?? setInterval;
-  periodicTimer = schedule(reportPeriodicGauge, REMOTE_USAGE_GAUGE_INTERVAL_MS);
-  periodicTimer.unref?.();
+  const timer = schedule(reportPeriodicGauge, REMOTE_USAGE_GAUGE_INTERVAL_MS);
+  periodicTimer = timer;
+  // 浏览器型 setInterval 返回数字,没有 unref;node 的 Timeout 才有。
+  if (typeof timer === "object") timer.unref?.();
 }
 
 function dispatchSafely(rendererId: number, payload: ArmsCustomEventPayload): void {

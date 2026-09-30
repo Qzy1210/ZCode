@@ -83,7 +83,18 @@ function normalizeServerRemoteUrlForComparison(url: string): string {
   }
 }
 
-function isSameRemoteTarget(left: RemoteTarget, right: RemoteTarget): boolean {
+/**
+ * 历史遗留的 "server" 远程目标:曾按 url 归一化后比较/生成遥测键。
+ * 现在 shared 的 RemoteTarget 联合只有 ssh/wsl/docker,全仓也没有任何生产者,
+ * 但这两个函数要保留对旧数据的处理(删掉分支会让同一目标被判成不同,行为会变),
+ * 所以在 desktop 本地把这条兼容面显式建模,而不是给公共联合加一个不存在的 kind。
+ */
+type LegacyServerRemoteTarget = { kind: "server"; url: string };
+
+/** isSameRemoteTarget / buildRemoteTargetTelemetryKey 的入参:现有 kind + 遗留 server。 */
+type ComparableRemoteTarget = RemoteTarget | LegacyServerRemoteTarget;
+
+function isSameRemoteTarget(left: ComparableRemoteTarget, right: ComparableRemoteTarget): boolean {
   if (left.kind !== right.kind) return false;
   switch (left.kind) {
     case "ssh":
@@ -111,7 +122,7 @@ function isSameRemoteTarget(left: RemoteTarget, right: RemoteTarget): boolean {
   }
 }
 
-function buildRemoteTargetTelemetryKey(target: RemoteTarget): string {
+function buildRemoteTargetTelemetryKey(target: ComparableRemoteTarget): string {
   switch (target.kind) {
     case "ssh":
       return `ssh:${buildSshRemoteHostKey(target)}`;

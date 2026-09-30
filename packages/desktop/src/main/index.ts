@@ -731,7 +731,10 @@ const appTelemetryCore = createTelemetryCore({
   loadAuthorization: createTelemetryAuthorizationLoader(appTelemetryCredentialService),
   loadMarketingParams: createTelemetryMarketingParamsLoader(appTelemetryCredentialService),
   resolveZCodeEndpointOrigin: resolveCurrentZCodeEndpointOrigin,
-  fetchImpl: createDesktopTelemetryFetch(net),
+  fetchImpl: createDesktopTelemetryFetch({
+    // Electron 的 net.fetch 只收 string | Request;URL 先归一成字符串(语义不变)。
+    fetch: (input, init) => net.fetch(input instanceof URL ? input.toString() : input, init),
+  }),
 });
 const appTelemetryRuntime = createAppTelemetryRuntime({
   telemetryCore: appTelemetryCore,
@@ -1866,8 +1869,9 @@ function createWindowInstance(startupBootstrap: StartupWindowBootstrap = {}) {
     initialDesktopZoomLevel: currentDesktopZoomLevel,
     initialWindowSize: currentDesktopWindowSize,
     currentApplicationLocale: () => currentApplicationLocale,
+    // 契约两侧的空值表达不同(null vs undefined),语义一致:统一成 undefined。
     resolveBrowserViewOwner: (webContentsId) =>
-      browserGuestManager.getTabOwnerByWebContentsId(webContentsId),
+      browserGuestManager.getTabOwnerByWebContentsId(webContentsId) ?? undefined,
     persistWindowSize: async (state) => {
       currentDesktopWindowSize = state;
       await mainSettingService.update({ desktopWindowSize: state });
@@ -2173,7 +2177,8 @@ app.whenReady().then(async () => {
     getDesktopSessionActivity: () => ({
       runningAgentSessionCount: getRunningAgentSessionCount(),
     }),
-    syncAppSettings: syncImmediateAppSettings,
+    // 目标契约按 unknown 收(setter 来自平台面),这里显式落到 AppSettings 补丁类型。
+    syncAppSettings: (patch) => syncImmediateAppSettings(patch as Partial<AppSettings>),
     setShortcutRecordingActive,
     deviceMid,
     mobilePairing,
@@ -2316,7 +2321,11 @@ app.whenReady().then(async () => {
   });
 
   const protocolUrl = extractDeepLinkUrlFromArgs(process.argv);
-  if (startupDeepLinkConsumptionGate.shouldHandleReadyProtocolUrl(protocolUrl)) {
+  // gate 内部对 null 直接判 false;这里先收窄,handleDeepLink 只接受非空字符串。
+  if (
+    protocolUrl !== null &&
+    startupDeepLinkConsumptionGate.shouldHandleReadyProtocolUrl(protocolUrl)
+  ) {
     handleDeepLink(protocolUrl, logger, {
       confirmationCopy: resolveExternalWorkspaceConfirmationCopy(),
       resolveApplicationWindow: () => getApplicationWindowsExcludingCuaIndicator()[0] ?? null,

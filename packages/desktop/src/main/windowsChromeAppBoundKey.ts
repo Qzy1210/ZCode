@@ -75,6 +75,10 @@ interface HelperProcessResult {
 
 interface ReadAppBoundKeyOptions {
   appExecutablePath?: string;
+  // 与公开契约 WindowsChromeAppBoundKeyReader 对齐:调用方会传这两个字段做版本/commit 校验,
+  // 缺席时按 ZCODE_VERSION / ZCODE_COMMIT 兜底(见本文件实现)。
+  expectedAppVersion?: string;
+  expectedBuildCommit?: string;
   chromeExecutablePath: string;
   helperPath?: string;
   isPackaged?: boolean;

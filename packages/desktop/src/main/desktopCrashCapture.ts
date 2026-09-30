@@ -175,6 +175,8 @@ function pruneCrashDumpArchive(
 
   while (keptCount > 1 && (keptCount > maxFiles || keptBytes > maxTotalBytes)) {
     const dump = dumps[keptCount - 1];
+    // keptCount > 1 已保证下标有效;这里只是把这个事实写给类型系统。
+    if (dump === undefined) break;
     dumpsToDelete.push(dump);
     keptCount -= 1;
     keptBytes -= dump.size;
