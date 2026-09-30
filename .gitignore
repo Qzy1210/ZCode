@@ -69,3 +69,10 @@ packages/desktop/.e2e-artifacts/
 packages/desktop/.e2e-cache/
 packages/desktop/.e2e-network-capture/
 .zcode-runtime/
+
+# tsc 误把编译产物 emit 回源码树(源码与产物同目录会让模块解析变含糊;桌面打包走 tsup)。
+# 需要手写声明时放到 scripts/ 或独立声明目录,不要放进 src/**。
+packages/desktop/src/**/*.js
+packages/desktop/src/**/*.js.map
+packages/desktop/src/**/*.d.ts
+packages/desktop/src/**/*.d.ts.map
