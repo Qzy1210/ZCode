@@ -76,3 +76,5 @@ packages/desktop/src/**/*.js
 packages/desktop/src/**/*.js.map
 packages/desktop/src/**/*.d.ts
 packages/desktop/src/**/*.d.ts.map
+.zcode/
+.zcodeignore
