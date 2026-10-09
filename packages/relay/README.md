@@ -123,3 +123,18 @@ sudo certbot certonly --standalone -d relay.example.com
 | `RELAY_HOST` | 0.0.0.0 | 监听地址 |
 | `RELAY_WEB_DIST` | ./web-dist | 手机页面目录 |
 | `RELAY_TLS_CERT` / `RELAY_TLS_KEY` | (无) | 提供时启用 HTTPS/WSS |
+
+## 静态资源服务(手机页与 APK 分发)
+
+- 只把 `/assets/**`(或 `/remote/assets/**`)当文件服务,其余路径一律回 `index.html`(SPA 兜底)。
+  因此**分发安装包要放到 `web-dist/assets/` 下**,放错目录会下载到 32KB 的 HTML 而不是 APK。
+- 响应头:`Content-Length`(浏览器据此显示总大小与进度条)+ `Accept-Ranges: bytes`
+  + 支持单段 `bytes=start-end` / 后缀 `bytes=-N`(206 Partial Content,可断点续传;
+  越界回 416)。**Range 请求不压缩**——字节区间必须落在原始表示上。
+- 文本类资源(`.js/.css/.json/...`)仍按需 gzip,压缩后同样带 `Content-Length`。
+- 该前缀统一 `Cache-Control: public, max-age=31536000, immutable`,所以**文件名必须带
+  版本/内容哈希**:固定名会让手机浏览器长期缓存旧包,反复装到老版本。
+- 校验:`GET` 是唯一允许的方法(HEAD 会 405),检查响应头请用 `curl -D -` 整包拉取。
+
+分发包的发布脚本见 `packages/mobile-app/scripts/publish-apk-to-relay.sh`(构建 → 带版本命名
+→ scp → 公网回读校验 SHA-256 → 打印下载链接)。

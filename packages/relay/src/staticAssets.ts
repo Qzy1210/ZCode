@@ -95,9 +95,36 @@ export function createRelayStaticAssets(webDistDir: string): RelayStaticAssets {
       try {
         const content = await readFile(absolute);
         const mime = MIME_BY_EXT[extname(absolute)] ?? "application/octet-stream";
+        // Range 优先于 gzip:字节区间必须落在原始表示上,压缩后的偏移没有意义。
+        // 大文件(如分发的 APK)靠它才能显示进度并断点续传。
+        const range = parseByteRange(request.headers.range, content.byteLength);
+        if (range === "unsatisfiable") {
+          res.writeHead(416, {
+            "Content-Range": `bytes */${content.byteLength}`,
+            "Accept-Ranges": "bytes",
+          });
+          res.end();
+          return;
+        }
+        if (range) {
+          const body = content.subarray(range.start, range.end + 1);
+          res.writeHead(206, {
+            "Content-Type": mime,
+            "Content-Length": String(body.byteLength),
+            "Content-Range": `bytes ${range.start}-${range.end}/${content.byteLength}`,
+            "Accept-Ranges": "bytes",
+            "Cache-Control": HASHED_ASSET_CACHE_CONTROL,
+          });
+          res.end(body);
+          return;
+        }
         const compressed = maybeGzip(request, absolute, content);
         res.writeHead(200, {
           "Content-Type": mime,
+          // 显式长度:省略它 Node 会退化成 chunked,浏览器就显示"未知大小"、没有进度条,
+          // 也无法配合 Range 续传(实测分发 38MB APK 时最明显)。
+          "Content-Length": String(compressed.body.byteLength),
+          "Accept-Ranges": "bytes",
           "Cache-Control": HASHED_ASSET_CACHE_CONTROL,
           Vary: "Accept-Encoding",
           ...(compressed.encoding ? { "Content-Encoding": compressed.encoding } : {}),
@@ -108,4 +135,30 @@ export function createRelayStaticAssets(webDistDir: string): RelayStaticAssets {
       }
     },
   };
+}
+
+/**
+ * 解析单段 `Range: bytes=start-end`(浏览器/下载器最常用形式)。
+ * 返回 null 表示没有 Range 或不认识(按 200 整包响应);`unsatisfiable` 表示起点越界(应回 416)。
+ */
+function parseByteRange(
+  header: string | undefined,
+  totalBytes: number,
+): { start: number; end: number } | "unsatisfiable" | null {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match) return null;
+  const [, rawStart, rawEnd] = match;
+  if (rawStart === "" && rawEnd === "") return null;
+  // 后缀区间 `bytes=-N`:最后 N 字节。
+  if (rawStart === "") {
+    const suffixLength = Number(rawEnd);
+    if (suffixLength <= 0) return "unsatisfiable";
+    return { start: Math.max(0, totalBytes - suffixLength), end: totalBytes - 1 };
+  }
+  const start = Number(rawStart);
+  if (start >= totalBytes) return "unsatisfiable";
+  const end = rawEnd === "" ? totalBytes - 1 : Math.min(Number(rawEnd), totalBytes - 1);
+  if (end < start) return "unsatisfiable";
+  return { start, end };
 }
