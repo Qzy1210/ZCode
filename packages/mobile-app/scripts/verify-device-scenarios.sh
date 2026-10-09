@@ -25,6 +25,14 @@ say() { printf '%s\n' "$*"; }
 ok() { PASS=$((PASS + 1)); say "PASS  $1"; }
 bad() { FAIL=$((FAIL + 1)); say "FAIL  $1${2:+ :: $2}"; }
 
+dump_text_only() {
+  # 只看 text= 节点(不含 content-desc):面板标题是 text,工具条入口是 accessibilityLabel,
+  # 两者混在一起会让"面板已打开"误判(会话正文里也可能出现"已用/上限/剩余")。
+  adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
+  adb shell cat /sdcard/scenario.xml 2>/dev/null |
+    tr '>' '\n' | grep -oE 'text="[^"]*"' | grep -v 'text=""' | sed 's/text=//g; s/"//g'
+}
+
 dump_texts() {
   adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
   # text 与 content-desc 都收:工具条图标按钮(＋/🛡/◯/📦/🧠)只带 accessibilityLabel,
@@ -59,7 +67,9 @@ x1,y1,x2,y2 = map(int, b.groups()); print((x1+x2)//2, (y1+y2)//2)
   py="$y"
   [ "$y" -lt 200 ] && py=$((y + 95))
   adb shell input tap "$px" "$py" >/dev/null 2>&1
-  sleep 3
+  # 成功判据用"会话屏出现"而不是"3 秒内界面变化":模拟器(冷启动/大会话)渲染可能更慢,
+  # md5 比对会在会话已经在渲染的路上就误判失败,后续检查随即落到列表上。
+  wait_for "模型:" 12 && return 0
   after="$(dump_texts | md5)"
   [ "$before" != "$after" ] && return 0
   return 1
@@ -96,12 +106,20 @@ for m in re.finditer(r'<node[^>]*/?>', xml):
 
 # 上滑(内容下移)以翻到更早的历史轮:运行中的会话默认停在最新轮。
 scroll_up() {
-  local times="${1:-2}" i
+  local times="${1:-2}" i width height cx top bottom
+  width="$(adb shell wm size 2>/dev/null | sed -n 's/.*: \([0-9]*\)x\([0-9]*\)/\1/p')"
+  height="$(adb shell wm size 2>/dev/null | sed -n 's/.*: \([0-9]*\)x\([0-9]*\)/\2/p')"
+  [ -n "$width" ] || width=1080
+  [ -n "$height" ] || height=2400
+  cx=$((width / 2))
+  top=$((height * 38 / 100))
+  bottom=$((height * 78 / 100))
   for i in $(seq 1 "$times"); do
-    adb shell input swipe 630 900 630 1900 300 >/dev/null 2>&1
+    adb shell input swipe "$cx" "$top" "$cx" "$bottom" 300 >/dev/null 2>&1
     sleep 1
   done
 }
+
 
 wait_for() {
   local target="$1" seconds="${2:-10}" i
@@ -116,22 +134,8 @@ wait_for() {
 tap_first_task() {
   local before after coord
   before="$(dump_texts | md5)"
-  coord="$(adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1; adb shell cat /sdcard/scenario.xml 2>/dev/null | python3 -c "
-import re, sys
-xml = sys.stdin.read()
-for m in re.finditer(r'<node[^>]*/?>', xml):
-    node = m.group(0)
-    if 'clickable=\"true\"' not in node:
-        continue
-    b = re.search(r'bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"', node)
-    if not b:
-        continue
-    x1, y1, x2, y2 = map(int, b.groups())
-    # 任务行:足够宽且在列表区域(排除顶部按钮/新建任务窄按钮)
-    if y1 > 400 and (x2 - x1) > 600:
-        print((x1 + x2) // 2, (y1 + y2) // 2)
-        break
-" 2>/dev/null)"
+  coord="$(adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
+    adb shell cat /sdcard/scenario.xml 2>/dev/null | python3 "$HERE/scripts/device-find-task-row.py")"
   if [ -z "$coord" ]; then say "  (未找到任务行)"; return 1; fi
   local px py y
   px="$(echo "$coord" | awk '{print $1}')"
@@ -144,6 +148,7 @@ for m in re.finditer(r'<node[^>]*/?>', xml):
   [ "$before" != "$after" ] && return 0
   return 1
 }
+
 
 diagnostics() {
   say "  --- 当前界面文本(前 12 条) ---"
@@ -162,8 +167,8 @@ if dump_texts | grep -q "加载更早的消息"; then bad "场景 17:列表仍�
 if dump_texts | grep -qE "同步中|同步失败"; then bad "列表卡在同步中/同步失败"; else ok "列表未卡在同步态"; fi
 
 # ── 场景 30:项目行点击展开/收起 ──
-# P6-3 起项目是卡片:折叠箭头在「N 个任务 ▾/▸」文本里(不再是独立节点)。
-# 判定:点卡片头 → 含「个任务 ▾」的文本变「个任务 ▸」且首个任务行移出。
+# 项目卡片的折叠箭头在「N 个任务 ▾/▸」文本里(不再是独立节点);坐标按窗口相对值取,
+# 落在顶部状态栏区域时补状态栏偏移。
 card_arrow_bounds() {
   local arrow="$1"
   adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
@@ -174,6 +179,8 @@ xml = sys.stdin.read()
 for m in re.finditer(r'<node[^>]*/?>', xml):
     node = m.group(0)
     if f'个任务 {arrow}' not in node: continue
+    # 跳过 0 个任务的项目(折叠它不会有任何任务行消失,判定会假失败)。
+    if '0 个任务' in node: continue
     b = re.search(r'bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"', node)
     if b:
         x1, y1, x2, y2 = map(int, b.groups())
@@ -181,48 +188,38 @@ for m in re.finditer(r'<node[^>]*/?>', xml):
         break
 " "$arrow" 2>/dev/null
 }
-first_task_below_card() {
+# 判定用"可见任务行数量":折叠该卡片后其任务行应从无障碍树消失。
+# (之前比"卡片下方第一行文本",在首个项目没有任务时会比到下一张卡片的标题,永远不变。)
+dump_task_rows() {
   adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
-  adb shell cat /sdcard/scenario.xml 2>/dev/null | python3 -c "
-import re, sys
-xml = sys.stdin.read()
-header_y = None
-for m in re.finditer(r'<node[^>]*/?>', xml):
-    node = m.group(0)
-    if header_y is None:
-        if '个任务 ' in node and ('▾' in node or '▸' in node):
-            b = re.search(r'bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"', node)
-            if b:
-                header_y = int(b.groups()[3])
-        continue
-    t = re.search(r'text=\"([^\"]*)\"', node)
-    b = re.search(r'bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"', node)
-    if t and b and t.group(1) and '个任务' not in t.group(1):
-        # 卡片头下方的第一个文本(剩余时间里/标题)视为首个任务行线索。
-        if int(b.groups()[1]) >= header_y and '更新于' not in t.group(1):
-            print(t.group(1)); break
-" 2>/dev/null
+  adb shell cat /sdcard/scenario.xml 2>/dev/null | python3 "$HERE/scripts/device-find-task-row.py" --list
+}
+# 折叠前记下"该卡片下第一个任务行"的标题(卡片头 y 之下、最近的一条),
+# 折叠后它必须从无障碍树里消失——比"可见行数"可靠:折叠腾出的空间会让
+# 其它卡片的任务滚进视口,总数可能不变。
+task_title_below() {
+  local header_y="$1"
+  dump_task_rows | awk -F'\t' -v hy="$header_y" '$1 > hy {print $2; exit}'
 }
 expanded_arrow="$(card_arrow_bounds "▾")"
 if [ -n "$expanded_arrow" ]; then
-  before_text="$(first_task_below_card)"
+  header_y="$(echo "$expanded_arrow" | awk '{print $2}')"
+  watched_title="$(task_title_below "$header_y")"
   adb shell input tap "$(echo "$expanded_arrow" | awk '{print $1}')" "$(echo "$expanded_arrow" | awk '{print $2}')" >/dev/null 2>&1
   sleep 2
   collapsed_arrow="$(card_arrow_bounds "▸")"
-  after_text="$(first_task_below_card)"
-  if [ -n "$collapsed_arrow" ] && [ "$before_text" != "$after_text" ]; then
-    ok "场景 30:点项目卡片收起任务(箭头 ▾→▸,任务行移出)"
+  if [ -n "$collapsed_arrow" ] && [ -n "$watched_title" ] && ! dump_task_rows | grep -qF "$watched_title"; then
+    ok "场景 30:点项目卡片收起任务(箭头 ▾→▸,任务行[${watched_title%% *}]移出)"
   else
-    bad "场景 30:收起后任务行未消失" "before=$before_text after=$after_text arrow=${collapsed_arrow:-无}"
+    bad "场景 30:收起后该卡片任务行仍在" "watched=${watched_title:-无} arrow=${collapsed_arrow:-无}"
   fi
   adb shell input tap "$(echo "$expanded_arrow" | awk '{print $1}')" "$(echo "$expanded_arrow" | awk '{print $2}')" >/dev/null 2>&1
   sleep 2
   restored_arrow="$(card_arrow_bounds "▾")"
-  restored_text="$(first_task_below_card)"
-  if [ -n "$restored_arrow" ] && [ "$restored_text" == "$before_text" ]; then
+  if [ -n "$restored_arrow" ] && [ -n "$watched_title" ] && dump_task_rows | grep -qF "$watched_title"; then
     ok "场景 30:再点展开恢复任务行"
   else
-    bad "场景 30:展开后任务行未恢复" "restored=$restored_text before=$before_text"
+    bad "场景 30:展开后该卡片任务行未恢复" "watched=${watched_title:-无}"
   fi
 else
   bad "场景 30:未找到可点项目卡片(个任务 ▾)"
@@ -265,15 +262,45 @@ else
   bad "场景 22:工具条缺少入口" "$missing_labels"
 fi
 # 逐个点开面板再关掉:确认「思考级别」「上下文用量」两个新面板可打开。
+# 判定用各面板独有的文案:思考级别面板有档位行;用量面板有「已用/上限/剩余」或空数据提示
+# —— 用量面板没有「选择在下次发送时生效」脚注(只读事实)。
+panel_open_signature() {
+  case "$1" in
+    "思考级别:") dump_text_only | grep -qxF "思考级别" ;;
+    *) dump_text_only | grep -qxF "上下文用量" ;;
+  esac
+}
+wait_for_panel_open() {
+  local label="$1" seconds="${2:-5}" i
+  for i in $(seq 1 "$seconds"); do
+    panel_open_signature "$label" && return 0
+    sleep 1
+  done
+  return 1
+}
+# 会话屏守卫:面板开关/返回键可能把屏幕带回列表,后续会话检查前先确保会话打开。
+ensure_session_open() {
+  if has_substring "模型:"; then return 0; fi
+  if tap_first_task; then
+    wait_for "模型:" 10
+    return 0
+  fi
+  return 1
+}
 for label in "思考级别:" "上下文用量"; do
   if tap_text_contains "$label"; then
-    if wait_for "选择在下次发送时生效" 5; then ok "场景 22:面板可打开($label)"; else bad "场景 22:面板未打开($label)"; fi
+    if wait_for_panel_open "$label" 5; then
+      ok "场景 22:面板可打开($label)"
+    else
+      bad "场景 22:面板未打开($label)"
+    fi
     adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1
     sleep 1
   else
     bad "场景 22:点不到 $label"
   fi
 done
+ensure_session_open || true
 # 运行中的会话视口停在最新轮,先上滑翻出已完成的轮再判定折叠与展开入口。
 if ! dump_texts | grep -qE '^(已工作|已处理|已停止|已失败|工作中|查看过程)'; then
   scroll_up 3
@@ -286,6 +313,13 @@ fi
 if dump_texts | grep -q "查看过程"; then
   ok "过程块提供「查看过程」入口"
   tap_text "查看过程" >/dev/null 2>&1 || true
+  # 工具卡片可能渲染在可视区之外:小幅上滑再看一次(模拟器屏幕更矮,更容易被挡)。
+  if ! dump_texts | grep -qE "^(展开|收起)$"; then
+    adb shell input swipe $(( $(adb shell wm size | sed -n 's/.*: \([0-9]*\)x.*/\1/p') / 2 )) \
+      $(( $(adb shell wm size | sed -n 's/.*x\([0-9]*\)$/\1/p') * 70 / 100 )) \
+      $(( $(adb shell wm size | sed -n 's/.*x\([0-9]*\)$/\1/p') * 40 / 100 )) 300 >/dev/null 2>&1
+    sleep 1
+  fi
   if dump_texts | grep -qE "^(展开|收起)$"; then
     ok "场景 25:展开后出现工具卡片(含展开入口)"
   else
@@ -316,10 +350,18 @@ fi
 # ── 场景 38:进入会话默认停在最新内容(离底才显示「跳到最新」按钮)──
 # 判定:刚进入时若停在底部,悬浮按钮不应出现在无障碍树里;
 # 若仍停在中间(修前就是这样),按钮会出现 → 明确判失败并给出证据。
-if dump_texts | grep -qF "跳到最新消息"; then
-  bad "场景 38:进入会话停在中间(出现了「跳到最新」按钮)"
+# 入口位置必须在"刚进入"时判定:此前的场景(翻历史)可能已经上滑,直接读当前状态会误判。
+adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1
+sleep 2
+if tap_first_task; then
+  sleep 2  # 等首帧与贴底收敛(收敛窗口约 0.6s)
+  if dump_texts | grep -qF "跳到最新消息"; then
+    bad "场景 38:进入会话停在中间(出现了「跳到最新」按钮)"
+  else
+    ok "场景 38:进入会话默认在最新内容"
+  fi
 else
-  ok "场景 38:进入会话默认在最新内容"
+  bad "场景 38:无法重新进入会话(返回后未见列表/会话)"
 fi
 # 手动上滑后按钮应出现(证明按钮不是死的),再点它回到最新。
 scroll_up 2
