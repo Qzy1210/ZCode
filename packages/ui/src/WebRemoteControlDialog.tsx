@@ -53,6 +53,8 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
   const [botEntryProvider, setBotEntryProvider] =
     useState<RemoteControlBotProvider | null>(null);
   const [qrImageUrl, setQrImageUrl] = useState<string | null>(null);
+  /** 二维码链接原文(复制按钮用;qrImageUrl 是渲染用的 data URL,复制它没有意义)。 */
+  const [qrUrl, setQrUrl] = useState<string | null>(null);
   const [qrError, setQrError] = useState<string | null>(null);
   const [qrLoading, setQrLoading] = useState(false);
   const [qrMode, setQrMode] = useState<"lan" | "relay" | null>(null);
@@ -75,6 +77,7 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
         if ("error" in result) {
           setQrError(result.error);
           setQrImageUrl(null);
+          setQrUrl(null);
           setQrMode(null);
           return;
         }
@@ -85,6 +88,7 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
         setQrExpired(false);
         const dataUrl = await QRCode.toDataURL(result.url, { margin: 1, width: 220 });
         setQrImageUrl(dataUrl);
+        setQrUrl(result.url);
         setQrStopped(false);
         logger.info("[WebRemoteControlDialog] 移动端配对二维码已生成", {
           mode: result.mode,
@@ -93,6 +97,7 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
       } catch (error) {
         setQrError(error instanceof Error ? error.message : String(error));
         setQrImageUrl(null);
+        setQrUrl(null);
       } finally {
         setQrLoading(false);
       }
@@ -109,6 +114,7 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
       setQrStopped(true);
       setQrExpired(false);
       setQrImageUrl(null);
+      setQrUrl(null);
       setQrMode(null);
       logger.info("[WebRemoteControlDialog] 移动端远控已停止");
     } catch (error) {
@@ -210,6 +216,7 @@ export const WebRemoteControlDialog = memo(function WebRemoteControlDialogCompon
               <MobilePairingQrSection
                 qrLoading={qrLoading}
                 qrImageUrl={qrImageUrl}
+                qrUrl={qrUrl}
                 qrExpired={qrExpired}
                 qrStopped={qrStopped}
                 qrError={qrError}

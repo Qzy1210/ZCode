@@ -1752,6 +1752,8 @@ const enUS: Record<string, string> = {
   "webRemoteControl.qr.hint.lan": "QR code is valid for 10 minutes; regenerating invalidates the old one. Phone must be on the same network; closing this dialog does not disconnect your phone.",
   "webRemoteControl.qr.hint.relay": "Connected via your self-hosted relay - works from any network. QR valid for 10 minutes; regenerating invalidates the old one; closing this dialog does not disconnect your phone.",
   "webRemoteControl.qr.regenerate": "Regenerate",
+  "webRemoteControl.qr.copyLink": "Copy link",
+  "webRemoteControl.qr.copied": "Copied",
   "webRemoteControl.qr.stop": "Stop remote control",
   "webRemoteControl.qr.expiredHint": "QR code expired. Regenerate it before scanning.",
   "webRemoteControl.devices.title": "Paired devices (scan-free)",

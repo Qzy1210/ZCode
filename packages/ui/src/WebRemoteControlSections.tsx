@@ -1,6 +1,7 @@
 /* WebRemoteControlDialog 的展示区块:配对二维码与已配对设备列表。
  * 从弹窗主体拆出以控制单文件行数;区块本身不持有弹窗状态,只做展示与回调上报。 */
-import { Power, QrCode, RefreshCw } from "lucide-react";
+import { useState } from "react";
+import { Check, Copy, Power, QrCode, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 
@@ -14,6 +15,7 @@ export interface MobilePairingDeviceSummary {
 export function MobilePairingQrSection({
   qrLoading,
   qrImageUrl,
+  qrUrl,
   qrExpired,
   qrStopped,
   qrError,
@@ -23,6 +25,8 @@ export function MobilePairingQrSection({
 }: {
   qrLoading: boolean;
   qrImageUrl: string | null;
+  /** 二维码链接原文:复制按钮复制它(展示用的 qrImageUrl 是 data URL)。 */
+  qrUrl: string | null;
   qrExpired: boolean;
   qrStopped: boolean;
   qrError: string | null;
@@ -31,6 +35,20 @@ export function MobilePairingQrSection({
   onStop: () => void;
 }) {
   const { intl } = useZCodeIntl();
+  /** 复制成功的短暂反馈(仅展示态,不进弹窗状态机)。 */
+  const [copied, setCopied] = useState(false);
+  const handleCopyLink = () => {
+    if (!qrUrl) return;
+    // 与仓库其它复制入口同款:Web/Electron renderer 均为安全上下文,取不到时静默忽略。
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) return;
+    void navigator.clipboard
+      .writeText(qrUrl)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1_500);
+      })
+      .catch(() => undefined);
+  };
   const regenerateButton = (labelId: string) => (
     <Button type="button" variant="outline" size="sm" onClick={onRegenerate}>
       <RefreshCw className="size-3.5" />
@@ -55,11 +73,27 @@ export function MobilePairingQrSection({
         {qrLoading ? (
           <div className="size-8 animate-spin rounded-full border-2 border-border border-t-primary" />
         ) : qrImageUrl && !qrExpired ? (
-          <img
-            src={qrImageUrl}
-            alt="mobile pairing qr"
-            className="size-[220px] rounded-lg bg-white p-1"
-          />
+          // 二维码 + 复制链接:桌面端只有二维码图片时,想在别处(如模拟器/另一台手机)
+          // 粘贴链接只能靠截图识别;这里直接给出可复制的原文。
+          <div className="flex flex-col items-center gap-3">
+            <img
+              src={qrImageUrl}
+              alt="mobile pairing qr"
+              className="size-[220px] rounded-lg bg-white p-1"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!qrUrl}
+              onClick={handleCopyLink}
+            >
+              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+              {intl.formatMessage({
+                id: copied ? "webRemoteControl.qr.copied" : "webRemoteControl.qr.copyLink",
+              })}
+            </Button>
+          </div>
         ) : qrImageUrl && qrExpired ? (
           <div className="max-w-xs space-y-2 text-center">
             <p className="text-ui-sm text-foreground-subtle">
