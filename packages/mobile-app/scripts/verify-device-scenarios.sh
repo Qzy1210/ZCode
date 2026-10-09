@@ -25,16 +25,30 @@ say() { printf '%s\n' "$*"; }
 ok() { PASS=$((PASS + 1)); say "PASS  $1"; }
 bad() { FAIL=$((FAIL + 1)); say "FAIL  $1${2:+ :: $2}"; }
 
+# 抓取 UI 树:确认 dump 成功再返回。模拟器镜像上 uiautomator 偶发 NPE(进程崩),
+# 此时旧 XML 会留在原处——不重试就会读到过期界面,产生假失败。
+dump_ui() {
+  local attempt=0
+  while [ "$attempt" -lt 4 ]; do
+    if adb shell uiautomator dump /sdcard/scenario.xml 2>/dev/null | grep -q "dumped to"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
+}
+
 dump_text_only() {
   # 只看 text= 节点(不含 content-desc):面板标题是 text,工具条入口是 accessibilityLabel,
   # 两者混在一起会让"面板已打开"误判(会话正文里也可能出现"已用/上限/剩余")。
-  adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
+  dump_ui || true
   adb shell cat /sdcard/scenario.xml 2>/dev/null |
     tr '>' '\n' | grep -oE 'text="[^"]*"' | grep -v 'text=""' | sed 's/text=//g; s/"//g'
 }
 
 dump_texts() {
-  adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
+  dump_ui || true
   # text 与 content-desc 都收:工具条图标按钮(＋/🛡/◯/📦/🧠)只带 accessibilityLabel,
   # 不读 content-desc 就看不到它们,场景判定会误判成"控件缺失"。
   adb shell cat /sdcard/scenario.xml 2>/dev/null |
@@ -78,7 +92,7 @@ x1,y1,x2,y2 = map(int, b.groups()); print((x1+x2)//2, (y1+y2)//2)
 # 点击"文本或 content-desc 包含子串"的控件(工具条图标只有 accessibilityLabel)。
 tap_text_contains() {
   local target="$1" coord x y py
-  adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
+  dump_ui || true
   coord="$(adb shell cat /sdcard/scenario.xml 2>/dev/null | python3 -c "
 import re, sys
 target = sys.argv[1]
@@ -134,7 +148,7 @@ wait_for() {
 tap_first_task() {
   local before after coord
   before="$(dump_texts | md5)"
-  coord="$(adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
+  coord="$(dump_ui || true
     adb shell cat /sdcard/scenario.xml 2>/dev/null | python3 "$HERE/scripts/device-find-task-row.py")"
   if [ -z "$coord" ]; then say "  (未找到任务行)"; return 1; fi
   local px py y
@@ -171,7 +185,7 @@ if dump_texts | grep -qE "同步中|同步失败"; then bad "列表卡在同步�
 # 落在顶部状态栏区域时补状态栏偏移。
 card_arrow_bounds() {
   local arrow="$1"
-  adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
+  dump_ui || true
   adb shell cat /sdcard/scenario.xml 2>/dev/null | python3 -c "
 import re, sys
 arrow = sys.argv[1]
@@ -191,7 +205,7 @@ for m in re.finditer(r'<node[^>]*/?>', xml):
 # 判定用"可见任务行数量":折叠该卡片后其任务行应从无障碍树消失。
 # (之前比"卡片下方第一行文本",在首个项目没有任务时会比到下一张卡片的标题,永远不变。)
 dump_task_rows() {
-  adb shell uiautomator dump /sdcard/scenario.xml >/dev/null 2>&1
+  dump_ui || true
   adb shell cat /sdcard/scenario.xml 2>/dev/null | python3 "$HERE/scripts/device-find-task-row.py" --list
 }
 # 折叠前记下"该卡片下第一个任务行"的标题(卡片头 y 之下、最近的一条),
@@ -204,7 +218,9 @@ task_title_below() {
 expanded_arrow="$(card_arrow_bounds "▾")"
 if [ -n "$expanded_arrow" ]; then
   header_y="$(echo "$expanded_arrow" | awk '{print $2}')"
-  watched_title="$(task_title_below "$header_y")"
+  # 只取标题部分:任务行标签是「标题, 相对时间, 状态」,相对时间会随时间变化,
+  # 用全串比对会在任务更新后假失败(踩过一次)。
+  watched_title="$(task_title_below "$header_y" | sed 's/, .*$//')"
   adb shell input tap "$(echo "$expanded_arrow" | awk '{print $1}')" "$(echo "$expanded_arrow" | awk '{print $2}')" >/dev/null 2>&1
   sleep 2
   collapsed_arrow="$(card_arrow_bounds "▸")"
@@ -302,9 +318,12 @@ for label in "思考级别:" "上下文用量"; do
 done
 ensure_session_open || true
 # 运行中的会话视口停在最新轮,先上滑翻出已完成的轮再判定折叠与展开入口。
-if ! dump_texts | grep -qE '^(已工作|已处理|已停止|已失败|工作中|查看过程)'; then
-  scroll_up 3
-fi
+# 逐次上滑并即时判定:长会话里完成轮可能在多屏之外,固定滚 3 次会漏(出现假失败)。
+scroll_tries=0
+while [ "$scroll_tries" -lt 6 ] && ! dump_texts | grep -qE '^(已工作|已处理|已停止|已失败|工作中|查看过程)'; do
+  scroll_tries=$((scroll_tries + 1))
+  scroll_up 1
+done
 if dump_texts | grep -qE '^(已工作|已处理|已停止|已失败|工作中)'; then
   ok "场景 18:完成轮折叠为一行摘要"
 else
@@ -313,13 +332,16 @@ fi
 if dump_texts | grep -q "查看过程"; then
   ok "过程块提供「查看过程」入口"
   tap_text "查看过程" >/dev/null 2>&1 || true
-  # 工具卡片可能渲染在可视区之外:小幅上滑再看一次(模拟器屏幕更矮,更容易被挡)。
-  if ! dump_texts | grep -qE "^(展开|收起)$"; then
+  # 工具卡片可能渲染在可视区之外:最多补 3 次小幅上滑再判定(模拟器屏幕更矮;
+  # 会话内容越长,卡片越可能落在折叠区之外——单次滚动不足以稳定命中)。
+  nudge=0
+  while [ "$nudge" -lt 3 ] && ! dump_texts | grep -qE "^(展开|收起)$"; do
+    nudge=$((nudge + 1))
     adb shell input swipe $(( $(adb shell wm size | sed -n 's/.*: \([0-9]*\)x.*/\1/p') / 2 )) \
       $(( $(adb shell wm size | sed -n 's/.*x\([0-9]*\)$/\1/p') * 70 / 100 )) \
       $(( $(adb shell wm size | sed -n 's/.*x\([0-9]*\)$/\1/p') * 40 / 100 )) 300 >/dev/null 2>&1
     sleep 1
-  fi
+  done
   if dump_texts | grep -qE "^(展开|收起)$"; then
     ok "场景 25:展开后出现工具卡片(含展开入口)"
   else

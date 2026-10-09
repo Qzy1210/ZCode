@@ -39,7 +39,9 @@
         {
           "android": {
             "ndkVersion": "28.2.13676358",
-            "usesCleartextTraffic": true
+            "usesCleartextTraffic": true,
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true
           }
         }
       ],

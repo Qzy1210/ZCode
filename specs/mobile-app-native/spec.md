@@ -211,6 +211,8 @@ UI 只消费模型,不自己拼协议字段。
   - `verify-turn-model.ts`(23 项):轮分组与过程收敛(完成轮折叠/运行轮展开/中断失败强制展开/无最终正文不折叠/带 actions 的正文优先/时长文案),以及草稿级模型与模式的选项表与发送载荷。
   - 脚手架与夹具在 `verify-harness.ts`(按 schema 推最小合法值,避免手写巨型 fixture 与 schema 漂移)。
 - 真机:`bash packages/mobile-app/scripts/build-android-release.sh --install`(prebuild → 重打补丁 → gradle → adb install);桌面端需为已含 P1 host 的构建。
+- Release 体积:开启 R8(`enableMinifyInReleaseBuilds`)+ 资源压缩(`enableShrinkResourcesInReleaseBuilds`,写在 app.json 的 expo-build-properties 里以扛住 prebuild 重置)→ APK **36.2MB → 29.4MB**,其中 dex 27.9MB → 9.8MB;剩余主要是必要原生库(reactnative 6.7MB、expo-camera 扫码库 4.7MB、hermes 2.4MB)。R8 只影响 Java/Kotlin 侧(JS/Hermes 不受影响),已用模拟器跑完整 18 场景回归确认(免扫码凭证读取/会话/面板/折叠/跳转全部通过)。
+- 分发:`bash packages/mobile-app/scripts/publish-apk-to-relay.sh`(构建 → 版本+commit 命名 → scp 到 relay 的 `web-dist/assets/` → 公网回读校验 SHA-256 → 打印下载链接);relay 侧支持 `Content-Length` 与 `Range`(进度条/断点续传),该前缀缓存为 immutable,故文件名必须带版本。
 
 **P3 验证记录(2026-09-29)**:会话与交互用例 38/38 通过;根 typecheck 通过、lint 0 error、架构检查 0 违规;App tsc/oxlint 干净。协议前提已核对:`state.updated` 补丁(含 `pendingInteractions`/`control`/`plan`)不受 replayable profile 过滤,手机能拿到交互与控制面。
 
