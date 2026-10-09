@@ -192,18 +192,21 @@ UI 只消费模型,不自己拼协议字段。
 32. 唤起键盘后输入框抬到键盘上方,输入内容可见;收起键盘恢复。
 33. 助手正文中的 markdown 表格按表格渲染(表头加粗底色、分隔线、列对齐);不是合法表格的竖线文本原样保留。
 34. 新建任务进入会话后**立即**脱离"正在加载会话…"(首帧先于 ACK 到达时由 barrier 暂存、ownership 就位后回放);运行中的会话随时可见「中断」按钮。
+37. 进入会话默认停在**最新内容**(与桌面同一套底部锚定语义:程序化贴底与卡片测高补偿不得把跟随态打掉);只有用户手指驱动的滚动能解除跟随,向上翻历史时新到达的内容不会把视口拽回底部。
+38. 离底时列表右下角出现「跳到最新」悬浮按钮(与桌面端向下箭头同语义),点它恢复跟随并贴底;回到最底后按钮消失。
 35. 会话输入框占位文案与桌面 composer 同语义:无历史 →「向 ZCode 提问…」;有历史空闲 →「提出后续修改要求」;处理中 →「继续输入以排队后续修改」。
 36. 会话输入区底部是图标工具条(与桌面 composer 同构,单色线性图标 `MaterialCommunityIcons`——不用彩色 emoji):plus 添加上下文(移动端暂不支持,点击给一次性提示)· shield-alert 权限模式 · chart-donut 上下文用量(已用/上限/剩余%/距自动压缩)· cube 模型 · brain 思考级别(关闭/低/高/最高等,取值来自 `config.thoughtLevels`,provider 未知档位原样显示),右侧发送。选择仍只随下次发送提交:
     - 思考级别住在 `modelSelection.options.reasoningLevel`;只改档位时用会话当前模型补齐 provider/model(`resolveBaseModel`),没有基线模型则不下发(不伪造 provider);换模型会清掉草稿级档位(旧档位可能不被新模型支持)。
 
 ## 8. 构建与验证
 - 类型与静态检查:`pnpm typecheck`、`pnpm lint`、`pnpm architecture:check --changed`;App 侧另有 `npx tsc -p packages/mobile-app/tsconfig.json --noEmit` 与 `npx oxlint App.tsx index.ts src`。
-- 会话聚合、交互语义、连接生命周期与展示收敛:`pnpm --filter @zcode/mobile-app verify:conversation`(= `node scripts/verify.mjs all`),共七组:
+- 会话聚合、交互语义、连接生命周期与展示收敛:`pnpm --filter @zcode/mobile-app verify:conversation`(= `node scripts/verify.mjs all`),共八组:
   - `verify-store.ts`(32 项):快照/重复帧/delta/gap/分页前插/发送 ACK/交互应答下发/中断命令/dispose/**首帧先于 ACK 的订阅竞态**(`pushBeforeAck` 模拟 barrier 暂存回放);
   - `verify-model.ts`(16 项):交互卡片识别与答案形状(审批、计划哨兵值、问答 ", " 连接、hook review 跳过、计划进度);
   - `verify-connection-policy.ts`(25 项):断线分类表、退避封顶与按原因分档(10s/30s)、探活阈值/前台抑制、显式超时;
   - `verify-runtime.ts`(31 项):注入假 transport 与假时钟,覆盖断线保留画面+横条、退避重连、代际自增、`superseded` 终止不再重连、凭证失效清库、停止重连、重复断线不叠加、**一次断线只允许一条重试链**、**迟到定时器不得拆掉已恢复的连接**、`pair_unknown` 反复失败后仍能收敛;
   - `verify-markdown.ts`(21 项):行内代码/加粗/链接、代码块原样保留、未闭合围栏不吞内容、标题/引用/有序无序列表、列表项内行内标记、CRLF 归一、**表格**(对齐/行内标记/缺列补空/非法表格按段落保留/转义竖线);
+  - `verify-scroll-anchor.ts`(13 项):底部锚定纯函数——离底距离与容差边界、内容不足一屏、用户上滚/滚回对跟随态的影响、按钮显隐、行窗口两端变化分类(追加/前插/流式增长)与「前插不贴底、追加与增长贴底」;
   - `verify-tool-cards.ts`(25 项):工具卡片取值优先级(error → output.display → row.display → outputPreview → output.text)、六类工具摘要、diff 行前缀与截断标注、半截 JSON 入参、未知工具兜底;
   - `verify-turn-model.ts`(23 项):轮分组与过程收敛(完成轮折叠/运行轮展开/中断失败强制展开/无最终正文不折叠/带 actions 的正文优先/时长文案),以及草稿级模型与模式的选项表与发送载荷。
   - 脚手架与夹具在 `verify-harness.ts`(按 schema 推最小合法值,避免手写巨型 fixture 与 schema 漂移)。
@@ -346,6 +349,16 @@ UI 只消费模型,不自己拼协议字段。
 - 一致性:列表的项目图标同时从彩色 📁 换成 `folder-outline`(同色同尺寸);附件行的 📎 保留(行内文本,不构成图标排)。
 - 门禁:用例 219/219、App tsc/oxlint 干净、根 typecheck、lint 0 error、架构检查 0 违规;APK 构建(15:10)并 **adb 安装成功**。
 - **验证边界(如实记录)**:装机后设备 USB 反复掉线,只跑出部分场景——树上能读到图标节点、列表显示「已连接(免扫码) · 4 个工作区 · 9 个任务」,但完整 15 场景未跑满(最后一次完整通过是 emoji 版构建)。手机稳定后需重跑 `bash packages/mobile-app/scripts/verify-device-scenarios.sh`。
+
+**P6-7 验证记录(2026-09-30,真机反馈:进入会话停在中间)**
+- 现象:每次进入任务会话显示的不是最新内容,要往下翻好久。**根因是滚动定位,不是数据**:首帧窗口本就是尾部 N 行(`conversation-topic-publisher.ts` 的 `visibleRows.slice(-limit)`),但列表落在窗口顶部。
+- 两个缺陷叠加:① 原实现用"任何 onScroll 的离底距离"更新跟随态——程序化贴底与卡片测高补偿同样派发 onScroll,会把跟随态自己打掉,之后内容尺寸变化不再贴底;② 变高行(markdown 正文/工具卡)首帧后才测完高,单次 `scrollToEnd` 落在"当时的底",内容继续长高就停在半空。
+- 修法(对齐桌面 `packages/ui/src/v4/timelineScrollAnchor.ts` 的语义):新增纯函数模块 `conversation/scrollAnchor.ts`——`following` 表达**用户滚动权**,只有手指驱动窗口(拖拽/惯性,由 onScrollBeginDrag/onMomentumScrollEnd 划定)内的 onScroll 能改变它;`atBottom` 由几何驱动(含程序化事件)只控制按钮显隐。贴底改为**有界收敛**(120ms × 5 次,直到几何上到底或用户接管),兼容测高滞后。内容尺寸变化按"行窗口两端 id"分类:前插(仅首行变)不贴底、追加(尾行变)与流式增长(两端都不变)在跟随态下贴底——比原来只看尾行更准。
+- 新增能力:列表右下角「跳到最新」悬浮按钮(单色 chevron-down,离底才出现,点它恢复跟随)。
+- 结构:时间线(列表/轮分组/锚定/按钮)抽成 `screens/SessionTimeline.tsx`,会话屏回到 304 行、组件 272 行,均在单文件上限内。
+- 用例:新增 `verify-scroll-anchor.ts` **13/13**;全量 **232/232** 通过,App tsc/oxlint 干净。
+- 设备脚本:新增场景 38——进入会话时不许出现「跳到最新」按钮(= 默认在底部),上滑后按钮必须出现且点击后回到最新。
+- 待真机确认:进入会话的默认位置与按钮观感(构建后插上验证)。
 
 **P6-6 变更记录(2026-09-30,去掉启动占位图)**
 - 现象:打开 App 时闪过一张白底「横竖线网格 + 圆形」的图。

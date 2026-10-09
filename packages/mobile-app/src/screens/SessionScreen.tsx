@@ -6,17 +6,10 @@
  * - 进行中的轮默认展开,中断/失败强制展开,没有最终正文时不折叠。
  *
  * 数据全部来自 conversationStore(单一所有者),本组件不解析帧;
- * 单行渲染在 SessionRowView,协议语义在 interactionModel / turnRenderModel。
+ * 时间线(列表/轮分组/底部锚定)在 SessionTimeline,单行渲染在 SessionRowView。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import {
-  FlatList,
-  KeyboardAvoidingView,
-  Pressable,
-  Text,
-  View,
-  type NativeScrollEvent,
-} from "react-native";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { KeyboardAvoidingView, Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { RemoteServiceAccess } from "@zcode/client";
 
@@ -26,11 +19,6 @@ import {
   selectInteractionForDisplay,
   summarizePlan,
 } from "../conversation/interactionModel";
-import {
-  buildTurnRenderModel,
-  describeFileChanges,
-  type TurnRenderItem,
-} from "../conversation/turnRenderModel";
 import {
   buildSendOptions,
   describeDraftSummary,
@@ -45,11 +33,10 @@ import { formatRelativeTime } from "../theme";
 import { ConfigPickerSheet, type ConfigPickerTarget } from "./ConfigPickerSheet";
 import { InteractionCard } from "./InteractionCard";
 import { SessionComposer } from "./SessionComposer";
+import { SessionTimeline } from "./SessionTimeline";
 import { SessionStatusBar } from "./SessionStatusBar";
-import { SessionRowView } from "./SessionRowView";
 import { sessionStyles as styles } from "./sessionStyles";
 
-const DURATION_TICK_MS = 1_000;
 
 export function SessionScreen({
   services,
@@ -94,16 +81,8 @@ export function SessionScreen({
     store.getSnapshot,
   );
 
-  const listRef = useRef<FlatList<TurnRenderItem>>(null);
-  /** 尾部行 id:用于区分"新消息"与"前插历史",只在有新消息时跟随到底部。 */
-  const lastTailRowId = useRef<number>(-1);
-  /** 用户是否停留在底部:决定流式增长时是否继续跟随。 */
-  const stickToBottom = useRef(true);
   const [draft, setDraft] = useState("");
   /** 每个轮的过程块是否被手动展开;未记录时用模型给的默认值。 */
-  const [expandedTurns, setExpandedTurns] = useState<Record<string, boolean>>({});
-  /** 每秒 tick:驱动"工作中 N 秒"(仅在有流式内容时运行)。 */
-  const [nowMs, setNowMs] = useState(() => Date.now());
   /** 草稿级模型/模式/思考级别选择:随下一次发送提交,不改会话级配置(与桌面一致)。 */
   const [draftConfig, setDraftConfig] = useState<DraftConfig>({});
   const [pickerTarget, setPickerTarget] = useState<ConfigPickerTarget | null>(null);
@@ -118,11 +97,6 @@ export function SessionScreen({
    */
   const insets = useSafeAreaInsets();
 
-  useEffect(() => {
-    if (!view.streaming) return;
-    const timer = setInterval(() => setNowMs(Date.now()), DURATION_TICK_MS);
-    return () => clearInterval(timer);
-  }, [view.streaming]);
 
   const draftSummary = useMemo(
     () => describeDraftSummary(view.config, draftConfig),
@@ -152,32 +126,6 @@ export function SessionScreen({
       .finally(() => setLoadingModels(false));
   }, [pickerTarget, modelOptions.length, loadingModels, services]);
 
-  const items = useMemo(
-    () =>
-      buildTurnRenderModel(view.rows, {
-        nowMs,
-        ...(view.control?.phase ? { sessionPhase: view.control.phase } : {}),
-      }),
-    [view.rows, view.control?.phase, nowMs],
-  );
-
-  const handleScroll = useCallback((event: { nativeEvent: NativeScrollEvent }) => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const distanceFromEnd = contentSize.height - (contentOffset.y + layoutMeasurement.height);
-    stickToBottom.current = distanceFromEnd < 80;
-  }, []);
-
-  const scrollToEnd = useCallback(() => {
-    if (!stickToBottom.current) return;
-    listRef.current?.scrollToEnd({ animated: false });
-  }, []);
-
-  /** 滚到顶部附近自动加载更早的历史;到顶后不再请求。 */
-  const handleStartReached = useCallback(() => {
-    if (view.atTop || view.loadingOlder || view.status !== "ready") return;
-    void store.loadOlder();
-  }, [store, view.atTop, view.loadingOlder, view.status]);
-
   // 交互/控制面派生:协议判断都在纯函数里,这里只做 memo。
   const interactionCard = useMemo(
     () => selectInteractionForDisplay(view.pending),
@@ -196,50 +144,6 @@ export function SessionScreen({
       setComposerHint(null);
     }
   }, [draft, draftConfig, store, view.send.state, view.config]);
-
-  const toggleTurn = useCallback((turnId: string, next: boolean) => {
-    setExpandedTurns((current) => ({ ...current, [turnId]: next }));
-  }, []);
-
-  const renderItem = useCallback(
-    ({ item }: { item: TurnRenderItem }) => {
-      if (item.kind === "user") {
-        return (
-          <View style={[styles.row, styles.userRow]}>
-            <Text style={styles.userLabel}>你</Text>
-            <Text style={styles.userText}>{item.row.text}</Text>
-          </View>
-        );
-      }
-      if (item.kind === "row") {
-        return <SessionRowView row={item.row} {...(onOpenSession ? { onOpenSession } : {})} />;
-      }
-      const open = expandedTurns[item.turnId] ?? item.defaultOpen;
-      return (
-        <View style={styles.processBlock}>
-          <Pressable style={styles.processHeader} onPress={() => toggleTurn(item.turnId, !open)}>
-            <Text style={styles.processLabel} numberOfLines={1}>
-              {item.label}
-              {item.fileChanges ? ` · ${describeFileChanges(item.fileChanges)}` : ""}
-            </Text>
-            <Text style={styles.processChevron}>{open ? "收起" : "查看过程"}</Text>
-          </Pressable>
-          {open ? (
-            <View style={styles.processBody}>
-              {item.rows.map((row) => (
-                <SessionRowView
-                  key={row.rowId}
-                  row={row}
-                  {...(onOpenSession ? { onOpenSession } : {})}
-                />
-              ))}
-            </View>
-          ) : null}
-        </View>
-      );
-    },
-    [expandedTurns, onOpenSession, toggleTurn],
-  );
 
   const planSuffix = planProgress
     ? ` · 计划 ${planProgress.completed}/${planProgress.total}`
@@ -350,39 +254,15 @@ export function SessionScreen({
         onRemove={(queueItemId) => void store.removeQueuedItem(queueItemId)}
       />
 
-      <FlatList
-        ref={listRef}
-        data={items}
-        keyExtractor={(item) => item.key}
-        renderItem={renderItem}
-        contentContainerStyle={styles.listContent}
-        onScroll={handleScroll}
-        onContentSizeChange={() => {
-          // 只看尾部行是否变化:前插历史也会改变 contentSize,若一律滚到底
-          // 会把正在看历史的用户拽回底部。
-          const tailKey = view.rows.length > 0 ? view.rows[view.rows.length - 1]!.rowId : -1;
-          if (tailKey !== lastTailRowId.current) {
-            lastTailRowId.current = tailKey;
-            scrollToEnd();
-          }
-        }}
-        // 滚到顶部附近即自动加载更早的历史(不再有底部按钮);
-        // maintainVisibleContentPosition 保证前插时视口不跳。
-        onStartReached={handleStartReached}
-        onStartReachedThreshold={0.4}
-        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
-        ListHeaderComponent={
-          view.loadingOlder ? (
-            <Text style={styles.loadOlderText}>正在加载更早…</Text>
-          ) : null
-        }
-        ListEmptyComponent={
-          view.status === "loading" ? (
-            <Text style={styles.emptyText}>正在加载会话…</Text>
-          ) : (
-            <Text style={styles.emptyText}>这个任务还没有消息</Text>
-          )
-        }
+      <SessionTimeline
+        rows={view.rows}
+        {...(view.control?.phase ? { sessionPhase: view.control.phase } : {})}
+        streaming={view.streaming}
+        status={view.status}
+        loadingOlder={view.loadingOlder}
+        atTop={view.atTop}
+        onLoadOlder={() => void store.loadOlder()}
+        {...(onOpenSession ? { onOpenSession } : {})}
       />
 
       {interactionCard ? (

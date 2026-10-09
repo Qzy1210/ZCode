@@ -7,6 +7,7 @@
  *   node packages/mobile-app/scripts/verify.mjs turns      # 轮分组与过程收敛
  *   node packages/mobile-app/scripts/verify.mjs tools      # 工具卡片取值与截断
  *   node packages/mobile-app/scripts/verify.mjs markdown   # markdown 解析
+ *   node packages/mobile-app/scripts/verify.mjs scroll     # 底部锚定(跟随权/贴底/前插)
  *
  * 用例是仓库内的 .ts(Node 无法直接解析 App 源码里的无扩展名相对导入,
  * 先用 esbuild 打成单文件再执行)。只用仓库内依赖,不引入测试框架。
@@ -26,6 +27,7 @@ const ENTRIES = {
   turns: "verify-turn-model.ts",
   tools: "verify-tool-cards.ts",
   markdown: "verify-markdown.ts",
+  scroll: "verify-scroll-anchor.ts",
 };
 const requested = process.argv[2] ?? "all";
 const targets =

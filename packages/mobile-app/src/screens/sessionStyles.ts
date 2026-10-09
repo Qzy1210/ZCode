@@ -30,6 +30,21 @@ export const sessionStyles = StyleSheet.create({
   },
   retryText: { color: theme.foreground, fontSize: 12 },
   listContent: { paddingVertical: 12, paddingHorizontal: 14, gap: 10 },
+  /** 列表容器:承载「跳到最新」悬浮按钮的定位上下文。 */
+  listWrapper: { flex: 1 },
+  jumpToBottomButton: {
+    position: "absolute",
+    right: 14,
+    bottom: 14,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: theme.card,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+  },
   row: { gap: 4 },
   userRow: {
     alignSelf: "flex-end",
