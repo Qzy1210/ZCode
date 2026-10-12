@@ -10,7 +10,8 @@ import { theme } from "../theme";
 
 function Inline({ segments, style }: { segments: InlineSegment[]; style?: object }) {
   return (
-    <Text style={style}>
+    // selectable:RN 的 Text 默认不可选,不开的话长按没有系统复制菜单。
+    <Text style={style} selectable>
       {segments.map((segment, index) => {
         if (segment.kind === "code") {
           return (
@@ -54,7 +55,9 @@ export function MarkdownText({ text, streaming = false }: { text: string; stream
           return (
             <View key={index} style={styles.codeBlock}>
               {block.language ? <Text style={styles.codeLanguage}>{block.language}</Text> : null}
-              <Text style={styles.codeText}>{block.text}</Text>
+              <Text style={styles.codeText} selectable>
+                {block.text}
+              </Text>
             </View>
           );
         }

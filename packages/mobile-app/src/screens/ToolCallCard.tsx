@@ -60,28 +60,28 @@ export function ToolCallCard({ row }: { row: ToolCallRow }) {
         </Text>
       </Pressable>
 
-      <Text style={styles.summary} numberOfLines={2}>
+      <Text style={styles.summary} numberOfLines={2} selectable>
         {model.summary}
       </Text>
       {model.detail ? (
-        <Text style={styles.detail} numberOfLines={2}>
+        <Text style={styles.detail} numberOfLines={2} selectable>
           {model.detail}
         </Text>
       ) : null}
 
-      {model.errorText ? <Text style={styles.error}>{model.errorText}</Text> : null}
+      {model.errorText ? <Text style={styles.error} selectable>{model.errorText}</Text> : null}
 
       {expanded && model.body ? (
         model.bodyKind === "diff" ? (
           <View style={styles.body}>
             {model.body.split("\n").map((line, index) => (
-              <Text key={index} style={[styles.diffLine, diffLineStyle(line)]}>
+              <Text key={index} style={[styles.diffLine, diffLineStyle(line)]} selectable>
                 {line.length > 0 ? line : " "}
               </Text>
             ))}
           </View>
         ) : (
-          <Text style={styles.bodyText} numberOfLines={60}>
+          <Text style={styles.bodyText} numberOfLines={60} selectable>
             {model.body}
           </Text>
         )

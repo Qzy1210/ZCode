@@ -40,8 +40,8 @@ export function SessionRowView({
       return (
         <View style={[styles.row, styles.userRow]}>
           <Text style={styles.userLabel}>你</Text>
-          <Text style={styles.userText}>{row.text}</Text>
-          {attachments ? <Text style={styles.attachmentText}>{attachments}</Text> : null}
+          <Text style={styles.userText} selectable>{row.text}</Text>
+          {attachments ? <Text style={styles.attachmentText} selectable>{attachments}</Text> : null}
         </View>
       );
     }
@@ -65,7 +65,7 @@ export function SessionRowView({
               : `思考${row.durationMs ? ` · ${Math.round(row.durationMs / 1000)}s` : ""}`}
           </Text>
           {row.state !== "streaming" && row.text.trim().length > 0 ? (
-            <Text style={styles.reasoningText}>
+            <Text style={styles.reasoningText} selectable>
               {truncateLines(row.text, 3, 240)}
             </Text>
           ) : null}
@@ -83,7 +83,7 @@ export function SessionRowView({
             {canDrill ? " · 点开查看" : ""}
           </Text>
           {row.summaryText.trim().length > 0 ? (
-            <Text style={styles.toolOutput}>{truncateLines(row.summaryText, 3, 240)}</Text>
+            <Text style={styles.toolOutput} selectable>{truncateLines(row.summaryText, 3, 240)}</Text>
           ) : null}
         </View>
       );
@@ -121,7 +121,7 @@ export function SessionRowView({
           <Text style={styles.toolName} numberOfLines={1}>
             产物 · {row.artifactType}
           </Text>
-          <Text style={styles.toolOutput} numberOfLines={1}>
+          <Text style={styles.toolOutput} numberOfLines={1} selectable>
             {row.displayName}
           </Text>
         </View>
