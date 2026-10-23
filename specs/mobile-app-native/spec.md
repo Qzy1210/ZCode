@@ -187,6 +187,7 @@ UI 只消费模型,不自己拼协议字段。
 16. 断线期间发送/审批/中断均不可用(按钮禁用),界面不卡死;`superseded` 时提示已由另一台手机接管且不再重连。
 30. 项目列表:点项目行展开/收起其下任务(默认展开,行首箭头指示状态);「＋ 新建任务」收进项目行尾的小圆钮,不再占一整块按钮。
 30a. 项目卡片化:每个项目一张卡(文件夹图标 + 名称 + 类型徽标 / 路径 / 「更新于 X」+「N 个任务 ▾」+「＋」),任务行在卡片内缩进一级(标题 + 相对时间在左,状态徽标右对齐)。
+30c. 项目卡排序:按该项目**非归档任务的最近 `updatedAt` 倒序**排(与卡片「更新于 X」同源同值);无任务的项目沉底;同层按 workspace key 字母序保证稳定。任务更新实时重排(收到 delta 即重算)。**不跟随桌面侧栏顺序**——那是渲染进程本地 tab 顺序,不上传 Host,协议 `WindowHostControllerWorkspaceFact` 也没有顺序/活跃字段,App 端拿不到;按最近活动排序是与桌面语义最接近的本地近似。
 30b. 启动器图标与桌面版同款(`assets/icon.png`,桌面 `packages/desktop/build/icon.png` 的拷贝;prebuild 重置后由 `patch-android-build.mjs` 重打 mipmap)。
 31. 会话屏顶部(返回/中断按钮)与底部输入框不被系统状态栏/导航条遮挡(edge-to-edge 由 App 自行让出安全区)。
 32. 唤起键盘后输入框抬到键盘上方,输入内容可见;收起键盘恢复。
@@ -371,3 +372,9 @@ UI 只消费模型,不自己拼协议字段。
 - 产物验证(APK 资源表,非真机):`drawable/splashscreen_logo` = XML(color-only),`color/splashscreen_background` = `#ff161616`,APK 内**无任何 splash 位图**;构建成功(15:23)。真机观感(启动不再闪图)待设备恢复连接后确认。
 - **真机确认(2026-09-30 用户反馈)**:重装新包后启动不再闪图 ✓。
 - 顺带:启动主题改用 `Theme.SplashScreen`(Android 12+ 启动画面 API,由 expo-splash-screen 提供),不再是旧式 windowBackground 贴图。
+
+**P6-8 变更记录(2026-10-23,项目列表按最近活动排序,场景 30c)**
+- 背景:用户反馈手机项目列表顺序与桌面不同步。查实:桌面侧栏顺序是渲染进程本地 tab 顺序(dnd-kit 拖拽、本地持久化),**不上传 Host**;controller 协议 `WindowHostControllerWorkspaceFact` 只有路径/连接态字段,没有顺序或活跃时间,App 端拿不到,此前只能按 workspace key 字母序本地排。
+- 修法(场景 30c):`taskStore.rebuildSnapshot` 改为按各工作区**非归档任务的最近 `updatedAt` 倒序**排(与卡片「更新于 X」同源同值);无任务的工作区沉底;同层按 key 字母序保证稳定。delta 到达即重算,任务更新会实时把项目顶到最前。
+- 用例:新增 `verify-task-store.ts`(注册名 `tasks`,共九组)5/5——快照排序/无任务沉底、delta 实时重排、同层字母序、归档任务不参与排序;全量 **237/237** 通过,App tsc/oxlint 干净,架构检查 0 违规。
+- 未做:完全跟随桌面手动排序(需把 tab 顺序传进 Host 再进协议,改动面大);子代理摘要长按复制仍被父级 Pressable 拦截(已知缺口,与本次无关)。

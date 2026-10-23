@@ -75,9 +75,26 @@ export function createTaskStore(services: RemoteServiceAccess): TaskStore {
           right.meta.updatedAt - left.meta.updatedAt ||
           left.meta.taskId.localeCompare(right.meta.taskId),
       );
-    const nextWorkspaces = Array.from(workspaces.values()).sort((left, right) =>
-      workspaceKeyOf(left).localeCompare(workspaceKeyOf(right)),
-    );
+    // 项目卡按最近任务时间倒序(与卡片「更新于」同源):桌面侧栏顺序是渲染进程
+    // 本地 tab 顺序,不上传 Host,controller 协议里也没有顺序/活跃字段,App 端
+    // 拿不到,只能本地近似——按最近活动排最接近桌面"常用的在前面"的语义。
+    const lastActivityByKey = new Map<string, number>();
+    for (const row of nextTasks) {
+      const key = workspaceKeyOf(row.meta);
+      const current = lastActivityByKey.get(key);
+      if (current === undefined || row.meta.updatedAt > current) {
+        lastActivityByKey.set(key, row.meta.updatedAt);
+      }
+    }
+    const nextWorkspaces = Array.from(workspaces.values()).sort((left, right) => {
+      const leftKey = workspaceKeyOf(left);
+      const rightKey = workspaceKeyOf(right);
+      // 无任务的工作区(活动时间取 0)沉底;同层按 key 字母序保证稳定。
+      return (
+        (lastActivityByKey.get(rightKey) ?? 0) - (lastActivityByKey.get(leftKey) ?? 0) ||
+        leftKey.localeCompare(rightKey)
+      );
+    });
     snapshot = { status, workspaces: nextWorkspaces, tasks: nextTasks };
   }
 

@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 
 const ENTRIES = {
   store: "verify-store.ts",
+  tasks: "verify-task-store.ts",
   model: "verify-model.ts",
   policy: "verify-connection-policy.ts",
   runtime: "verify-runtime.ts",
@@ -30,8 +31,7 @@ const ENTRIES = {
   scroll: "verify-scroll-anchor.ts",
 };
 const requested = process.argv[2] ?? "all";
-const targets =
-  requested === "all" ? Object.values(ENTRIES) : [ENTRIES[requested] ?? requested];
+const targets = requested === "all" ? Object.values(ENTRIES) : [ENTRIES[requested] ?? requested];
 if (targets.some((target) => target === undefined)) {
   console.error(`未知用例:${requested}(可用:all | ${Object.keys(ENTRIES).join(" | ")})`);
   process.exit(2);
