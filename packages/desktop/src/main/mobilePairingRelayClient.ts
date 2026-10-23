@@ -40,10 +40,13 @@ export interface RelayClientEvents {
 
 export type RelayClientStatus =
   | { kind: "connecting" }
-  | { kind: "registered"; sid: string }
+  // 常驻启动只注册 hostId 时 relay 回执的 sid 为 null,状态需如实表达。
+  | { kind: "registered"; sid: string | null }
   | { kind: "disconnected"; willRetry: boolean };
 
 export interface MobilePairingRelayClientHandle {
+  /** 主动建立(或复用)relay 连接:常驻启动时调用,不依赖二维码生成。 */
+  connect(): void;
   /** 注册(或重新注册)sid:生成新二维码后调用;断线时缓存待重连。 */
   registerSid(sid: string): void;
   /** 当前连接状态。 */
@@ -84,11 +87,11 @@ export function createMobilePairingRelayClient(
     if (disposed) return;
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempt, RECONNECT_MAX_MS);
     reconnectAttempt += 1;
-    reconnectTimer = setTimeout(() => connect(), delay);
+    reconnectTimer = setTimeout(() => openSocket(), delay);
     setStatus({ kind: "disconnected", willRetry: true });
   }
 
-  function connect(): void {
+  function openSocket(): void {
     if (disposed) return;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
       return;
@@ -128,8 +131,10 @@ export function createMobilePairingRelayClient(
         }
         if (control?.type === "host_registered") {
           reconnectAttempt = 0;
-          setStatus({ kind: "registered", sid: sid! });
-          logger.info(`[mobile-pairing] relay registered, sid=${sid!.slice(0, 6)}…`);
+          setStatus({ kind: "registered", sid });
+          logger.info(
+            `[mobile-pairing] relay registered, sid=${sid ? `${sid.slice(0, 6)}…` : "(none)"}`,
+          );
           return;
         }
         if (control?.type === "host_error") {
@@ -204,6 +209,9 @@ export function createMobilePairingRelayClient(
   }
 
   return {
+    connect() {
+      openSocket();
+    },
     registerSid(nextSid) {
       sid = nextSid;
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -223,7 +231,7 @@ export function createMobilePairingRelayClient(
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      connect();
+      openSocket();
     },
     getStatus() {
       return status;

@@ -267,6 +267,9 @@ export function createMobilePairingController(
     start() {
       const client = ensureRelayClient();
       if (client) {
+        // start() 此前只创建客户端未建连,导致桌面启动后必须打开二维码弹窗
+        // (registerSid)才会有 hostId 注册,手机免扫码连接一直报 pair_unknown。
+        client.connect();
         logger.info("[mobile-pairing] relay client started (always-on)");
       }
     },
